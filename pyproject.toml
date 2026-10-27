@@ -39,11 +39,12 @@ testpaths = ["tests"]
 
 # ---- macOS app bundle (Briefcase) -------------------------------------------
 [tool.briefcase]
-project_name = "Droplet Map"
+project_name = "droplet-map"
 bundle = "io.github.windowrainyoon"
 version = "0.1.0"
 url = "https://github.com/windowrainYOON/droplet-analysis"
 author = "Changwoo Yoon"
+license = "LicenseRef-Proprietary"
 
 [tool.briefcase.app.droplet_map]
 formal_name = "Droplet Map"
@@ -66,6 +67,8 @@ requires = [
 
 [tool.briefcase.app.droplet_map.macOS]
 universal_build = false
+# scipy / scikit-learn arm64 wheels need a newer macOS than Briefcase's 11.0 default
+min_os_version = "14.0"
 requires = ["std-nslog~=1.0.3"]
 document_type.dmap.description = "Droplet Map Project"
 document_type.dmap.extension = "dmap"
