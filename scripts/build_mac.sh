@@ -14,6 +14,8 @@ python -m pip install -q --upgrade pip
 python -m pip install -q "briefcase>=0.3.20" pillow
 
 briefcase create macOS app --no-input
+# create skips an app that already exists; always copy the current code and requirements
+briefcase update macOS app --update-requirements --update-resources --no-input
 briefcase build macOS app --no-input
 briefcase package macOS app --adhoc-sign --no-input
 
