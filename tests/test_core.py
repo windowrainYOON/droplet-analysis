@@ -67,3 +67,17 @@ def test_run_all_and_roundtrip(project, tmp_path):
     back = Project.load(path)
     assert back.conditions.to_dict() == project.conditions.to_dict()
     assert len(back.particles) == len(project.particles)
+
+
+def test_fill_from_group_names():
+    from droplet_map.core.conditions import fill_from_group_names, parse_group_name
+    assert parse_group_name("FITC-PRD, pH5, 150mM NaCl, 10% PEG") == {"pH": "5", "NaCl": "150", "PEG": "10"}
+    t = ConditionTable(["FITC-PRD, pH6, 0mM NaCl, 10% PEG", "FITC-PRD, pH7.5, 450mM NaCl, 10% PEG", "control"])
+    assert fill_from_group_names(t, "B260430-1hsU-200-4") == ["pH", "NaCl", "PEG", "Batch"]
+    assert t.get("NaCl").unit == "mM" and t.get("PEG").kind == "numeric"
+    assert list(t.numeric("pH")[:2]) == [6, 7.5] and t.numeric("NaCl").iloc[0] == 0
+    assert t.value("control", "pH") is None and t.value("control", "Batch") == "B260430-1hsU-200-4"
+    # typed values are kept; a second run has nothing left to fill
+    t.set_value("FITC-PRD, pH6, 0mM NaCl, 10% PEG", "pH", "6.2")
+    assert fill_from_group_names(t, "other") == []
+    assert t.value("FITC-PRD, pH6, 0mM NaCl, 10% PEG", "pH") == "6.2" and t.value("control", "Batch") == "B260430-1hsU-200-4"

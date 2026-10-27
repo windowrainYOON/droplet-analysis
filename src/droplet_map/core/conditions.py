@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 import io
 import json
+import re
 
 import numpy as np
 import pandas as pd
@@ -140,6 +141,54 @@ class ConditionTable:
                 if col in self.names():
                     self.set_value(g, col, row[col])
         return unmatched
+
+
+# Tokens like "pH5", "150mM NaCl", "10% PEG" in a group name. Order: (name, unit, pattern).
+NAME_PATTERNS = (
+    ("pH", "", re.compile(r"\bpH\s*(\d+(?:\.\d+)?)", re.I)),
+    ("NaCl", "mM", re.compile(r"(\d+(?:\.\d+)?)\s*mM\s*NaCl\b", re.I)),
+    ("PEG", "%", re.compile(r"(\d+(?:\.\d+)?)\s*%\s*PEG\b", re.I)),
+)
+
+
+def parse_group_name(group: str) -> dict[str, str]:
+    """Condition values written in a group name, e.g. "FITC-PRD, pH5, 150mM NaCl, 10% PEG"."""
+    out = {}
+    for name, _unit, pat in NAME_PATTERNS:
+        m = pat.search(group)
+        if m:
+            out[name] = m.group(1)
+    return out
+
+
+def fill_from_group_names(table: ConditionTable, batch: str = "") -> list[str]:
+    """Add pH / NaCl / PEG (and Batch when given) and fill them from the group names.
+
+    Only conditions found in at least one name are added. Only blank cells are filled: values
+    already entered are kept, and names without a token stay blank. Returns the names of the
+    conditions that got at least one new value.
+    """
+    parsed = {g: parse_group_name(g) for g in table.values.index}
+    filled = []
+    for name, unit, _pat in NAME_PATTERNS:
+        if not any(name in p for p in parsed.values()):
+            continue
+        if name not in table.names():
+            table.add_condition(ConditionDef(name, "numeric", unit))
+        new = [g for g, p in parsed.items() if name in p and table.value(g, name) is None]
+        for g in new:
+            table.set_value(g, name, parsed[g][name])
+        if new:
+            filled.append(name)
+    if batch.strip():
+        if "Batch" not in table.names():
+            table.add_condition(ConditionDef("Batch", "categorical"))
+        new = [g for g in table.values.index if table.value(g, "Batch") is None]
+        for g in new:
+            table.set_value(g, "Batch", batch)
+        if new:
+            filled.append("Batch")
+    return filled
 
 
 def guess_kind(series: pd.Series) -> str:

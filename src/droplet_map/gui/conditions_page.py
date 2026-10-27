@@ -5,7 +5,7 @@ import json
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from ..core.conditions import ConditionDef, ConditionTable, KINDS, KIND_LABELS
+from ..core.conditions import ConditionDef, ConditionTable, KINDS, KIND_LABELS, fill_from_group_names
 from .common import info_label, title_label, warn
 
 FIXED = 3  # star, group, particle count
@@ -161,7 +161,7 @@ class ConditionsPage(QtWidgets.QWidget):
                                  "엑셀에서 복사한 표를 셀에 붙여넣을 수 있고(⌘V), 여러 칸을 골라 한 번에 입력할 수 있습니다. "
                                  "★ 칸을 체크하면 기준 그룹(원하는 배치)이 됩니다."))
         bar = QtWidgets.QHBoxLayout()
-        for text, fn in (("+ 조건 추가", self.add_condition), ("조건 편집", self.edit_condition),
+        for text, fn in (("그룹 이름에서 조건 채우기…", self.fill_from_names), ("+ 조건 추가", self.add_condition), ("조건 편집", self.edit_condition),
                          ("조건 삭제", self.remove_condition), ("선택 칸 한 번에 입력", self.fill_selected),
                          ("조건 CSV 불러오기…", self.import_csv), ("조건 CSV 저장…", self.export_csv),
                          ("조건 목록 템플릿 저장…", self.save_template), ("템플릿 불러오기…", self.load_template)):
@@ -242,6 +242,28 @@ class ConditionsPage(QtWidgets.QWidget):
         if QtWidgets.QMessageBox.question(self, "조건 삭제", f"'{c.name}' 조건과 입력한 값을 모두 지울까요?") == QtWidgets.QMessageBox.Yes:
             self.project.conditions.remove_condition(c.name)
             self._after_edit()
+
+    def fill_from_names(self):
+        batch, ok = QtWidgets.QInputDialog.getText(
+            self, "그룹 이름에서 조건 채우기",
+            "그룹 이름의 pH · NaCl(mM) · PEG(%) 값을 빈칸에만 넣습니다. 이미 입력한 값은 그대로 두고,\n"
+            "이름에서 찾지 못한 칸은 빈칸(—)으로 남깁니다. 표에서 결과를 확인하세요.\n"
+            "빈 Batch 칸에 넣을 이름 (비우면 건너뜀):",
+            text=self._last_batch())
+        if not ok:
+            return
+        filled = fill_from_group_names(self.project.conditions, batch)
+        self._after_edit()
+        if not filled:
+            warn(self, "새로 채울 빈칸이 없습니다 (이름에서 값을 찾지 못했거나 이미 입력됨).")
+
+    def _last_batch(self):
+        t = self.project.conditions
+        if "Batch" in t.names():
+            vals = t.categorical("Batch").dropna()
+            if len(vals):
+                return str(vals.iloc[0])
+        return ""
 
     # ---- values ---------------------------------------------------------
     def _editable_selection(self):

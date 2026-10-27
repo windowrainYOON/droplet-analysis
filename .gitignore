@@ -13,3 +13,4 @@ logs/
 *.dmap
 examples/private/
 analysis/phase0/out/
+.briefcase/
