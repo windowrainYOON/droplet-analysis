@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv*/
+build/
+dist/
+logs/
+.pytest_cache/
+*.egg-info/
+.DS_Store
+# experiment data stays out of the repository
+*.csv
+!tests/data/*.csv
+*.dmap
+examples/private/
+analysis/phase0/out/

@@ -1,0 +1,73 @@
+[project]
+name = "droplet-map"
+version = "0.1.0"
+description = "Cluster and compare phase-separated protein droplets by morphology and experimental conditions"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6-Essentials>=6.7",
+    "pyqtgraph>=0.13.7",
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "scipy>=1.11",
+    "scikit-learn>=1.4",
+    "umap-learn>=0.5.6",
+    "igraph>=0.11",
+    "leidenalg>=0.10",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "briefcase>=0.3.20", "pillow"]
+
+[project.scripts]
+droplet-map = "droplet_map.app:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+droplet_map = ["resources/*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+# ---- macOS app bundle (Briefcase) -------------------------------------------
+[tool.briefcase]
+project_name = "Droplet Map"
+bundle = "io.github.windowrainyoon"
+version = "0.1.0"
+url = "https://github.com/windowrainYOON/droplet-analysis"
+author = "Changwoo Yoon"
+
+[tool.briefcase.app.droplet_map]
+formal_name = "Droplet Map"
+description = "Particle map, condition comparison and reference scoring for protein droplets"
+long_description = "Reads particle CSVs from image analysis, lets you enter experimental conditions per group, and maps, compares and scores the groups."
+sources = ["src/droplet_map"]
+icon = "src/droplet_map/resources/droplet_map"
+requires = [
+    "PySide6-Essentials>=6.7",
+    "pyqtgraph>=0.13.7",
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "scipy>=1.11",
+    "scikit-learn>=1.4",
+    "umap-learn>=0.5.6",
+    "igraph>=0.11",
+    "leidenalg>=0.10",
+    "matplotlib>=3.8",
+]
+
+[tool.briefcase.app.droplet_map.macOS]
+universal_build = false
+requires = ["std-nslog~=1.0.3"]
+document_type.dmap.description = "Droplet Map Project"
+document_type.dmap.extension = "dmap"
+document_type.dmap.icon = "src/droplet_map/resources/droplet_map"
+document_type.dmap.url = "https://github.com/windowrainYOON/droplet-analysis"
