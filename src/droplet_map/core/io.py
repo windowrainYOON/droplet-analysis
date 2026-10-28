@@ -75,30 +75,67 @@ def read_particle_csv(path: str | Path) -> pd.DataFrame:
     df["group"] = df["group"].astype(str).str.strip()
     df["image"] = df["image"].astype(str).str.strip()
     df["source_file"] = path.name
+    df.attrs["path"] = str(path)
     return df
 
 
 def load_particles(paths, existing: pd.DataFrame | None = None) -> pd.DataFrame:
-    """Read several CSVs into one table. When two files use the same group and image names
-    (e.g. both call their images 'img1'), the image name gets the file name in front so the
-    images stay separate."""
-    frames = [read_particle_csv(p) for p in paths]
+    return combine_frames([read_particle_csv(p) for p in paths], existing)
+
+
+def combine_frames(frames, existing: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Stack particle tables from several files.
+    - Each file gets a unique source label: its name, or 'folder/name' when another file with
+      the same name (e.g. every experiment's particle_shape.csv) is already there.
+    - When two files use the same group and image names (e.g. both call their images 'img1'),
+      the image name gets the file label in front so the images stay separate."""
+    labels = set(existing["source_file"].astype(str)) if existing is not None and "source_file" in existing else set()
     seen = {}
     if existing is not None and len(existing):
         for (g, im), src in existing.groupby(["group", "image"])["source_file"].first().items():
             seen[(g, im)] = src
     for f in frames:
-        src = f["source_file"].iloc[0] if len(f) else ""
+        if not len(f):
+            continue
+        label = _unique_label(f, labels)
+        labels.add(label)
+        f["source_file"] = label
         keys = set(zip(f["group"], f["image"]))
-        clash = {k for k in keys if k in seen and seen[k] != src}
+        clash = {k for k in keys if k in seen and seen[k] != label}
         if clash:
-            stem = Path(src).stem
+            stem = label.rsplit(".", 1)[0]
             m = [(g, im) in clash for g, im in zip(f["group"], f["image"])]
             f.loc[m, "image"] = stem + ":" + f.loc[m, "image"]
         for k in set(zip(f["group"], f["image"])):
-            seen.setdefault(k, src)
-    df = pd.concat(frames, ignore_index=True, sort=False)
-    return df.reset_index(drop=True)
+            seen.setdefault(k, label)
+    frames = [f for f in frames if len(f)]
+    if not frames:
+        raise ValueError("불러올 입자가 없습니다.")
+    return pd.concat(frames, ignore_index=True, sort=False).reset_index(drop=True)
+
+
+def _unique_label(f, taken) -> str:
+    name = str(f["source_file"].iloc[0])
+    path = Path(str(f.attrs.get("path", name)))
+    if name not in taken:
+        return name
+    cand = f"{path.parent.name}/{name}" if path.parent.name else name
+    i = 2
+    base = cand
+    while cand in taken:
+        cand = f"{base} ({i})"; i += 1
+    return cand
+
+
+def content_digest(df: pd.DataFrame) -> str:
+    """Fingerprint of a file's measurements (numeric columns only, so it does not depend on the
+    file name, the source label or renamed images). Equal digest = same data loaded twice."""
+    import hashlib
+    cols = [c for c in df.columns if c != "source_file" and pd.api.types.is_numeric_dtype(df[c]) and df[c].notna().any()]
+    num = df[sorted(cols)].astype("float64").reset_index(drop=True)   # same digest after concat / save
+    h = hashlib.sha1(",".join(num.columns).encode())
+    h.update(pd.util.hash_pandas_object(num, index=False).to_numpy().tobytes())
+    return h.hexdigest()
 
 
 def _is_angle(name: str) -> bool:

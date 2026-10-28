@@ -126,10 +126,33 @@ def test_multi_csv_missing_column_duplicates_and_image_names(tmp_path):
     n = len(pr.particles)
     notes = pr.add_csv([a])
     assert len(pr.particles) == n and notes                             # same file not added twice
+    (tmp_path / "copy").mkdir()
+    import shutil
+    shutil.copy(a, tmp_path / "copy" / "renamed.csv")
+    assert pr.add_csv([tmp_path / "copy" / "renamed.csv"]) and len(pr.particles) == n   # same content, new name
+    other = df[df["group"].str.contains("pH5")].copy(); other["eq_diameter_um"] *= 1.1
+    (tmp_path / "exp2").mkdir()
+    o = _write(other, tmp_path / "exp2" / "a.csv")                     # same file name, other data
+    pr.add_csv([o])
+    assert len(pr.particles) == n + len(other) and "exp2/a.csv" in set(pr.particles["source_file"])
+    n = len(pr.particles)
     c = _write(df[df["group"].str.contains("pH5")], tmp_path / "c.csv")  # same group + image names
     pr.add_csv([c])
     imgs = pr.particles[pr.particles["source_file"] == "c.csv"]["image"]
     assert imgs.str.startswith("c:").all()
+    pr.save(tmp_path / "m.dmap")
+    back = Project.load(tmp_path / "m.dmap")
+    assert back.add_csv([a]) and len(back.particles) == len(pr.particles)   # duplicate check after reopen
+
+
+def test_odd_format_file_does_not_switch_off_measurements(tmp_path):
+    df = synthetic(n_groups=4)
+    a = _write(df, tmp_path / "a.csv")
+    ij = pd.DataFrame({"group": "IJ", "image": "x", "Area": np.random.rand(60), "Circ.": np.random.rand(60),
+                       "Solidity": np.random.rand(60), "AR": 1 + np.random.rand(60)})
+    b = _write(ij, tmp_path / "ij.csv")
+    pr = Project.from_csv([a, b])
+    assert "circularity" in pr.roles.features() and len(pr.notes) == 1 and "ij.csv" in pr.notes[0]
 
 
 def test_numeric_looking_names_survive_save(tmp_path):

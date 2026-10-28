@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .io import ColumnRoles, guess_roles, load_particles
+from .io import ColumnRoles, combine_frames, content_digest, guess_roles, read_particle_csv
 from .conditions import ConditionTable
 from .analysis import Settings
 
@@ -34,21 +34,22 @@ class Project:
 
     @classmethod
     def from_csv(cls, paths) -> "Project":
-        df = load_particles(paths)
+        frames, notes = _read_unique(paths, set())
+        df = combine_frames(frames)
         roles = guess_roles(df)
         cond = ConditionTable(pd.unique(df["group"]))
         pr = cls(df, roles, cond)
-        pr.notes = pr.harmonize_features()
+        pr.notes = notes + pr.harmonize_features()
         return pr
 
     def add_csv(self, paths) -> list[str]:
-        """Append CSVs. Files already in the project (same file name) are skipped.
-        Returns notes for the user (skipped files, measurements turned off)."""
-        loaded = set(self.particles["source_file"].astype(str)) if "source_file" in self.particles else set()
-        notes = [f"{Path(p).name}: 이미 불러온 파일이라 건너뛰었습니다." for p in paths if Path(p).name in loaded]
-        paths = [p for p in paths if Path(p).name not in loaded]
-        if paths:
-            new = load_particles(paths, self.particles)
+        """Append CSVs. A file whose measurements are already in the project (same content,
+        whatever its name) is skipped. Returns notes for the user."""
+        have = {content_digest(g.drop(columns=["source_file"])) for _s, g in self.particles.groupby("source_file", sort=False)} \
+            if "source_file" in self.particles else set()
+        frames, notes = _read_unique(paths, have)
+        if frames:
+            new = combine_frames(frames, self.particles)
             self.particles = pd.concat([self.particles, new], ignore_index=True, sort=False)
             known = {c.name for c in self.roles.columns}
             for spec in guess_roles(self.particles).columns:
@@ -59,20 +60,33 @@ class Project:
         return notes
 
     def harmonize_features(self) -> list[str]:
-        """A measurement that some files do not have would make every particle of those files
-        fail QC. Such measurements are switched from analysis to 'measure' and reported."""
-        notes = []
+        """Measurements missing from some files would make every particle of those files fail QC.
+        - A file that lacks most of the analysed measurements is a different format: the
+          measurements stay on and that file's particles are left out of the analysis (reported).
+        - Otherwise the missing measurement is switched to 'measure' for everyone (reported).
+        Returns at most one message."""
         if "source_file" not in self.particles:
-            return notes
+            return []
         src = self.particles["source_file"].astype(str)
-        for f in self.roles.features():
-            missing = self.particles[f].isna().groupby(src).all()
-            files = sorted(missing[missing].index)
+        feats = self.roles.features()
+        if not feats:
+            return []
+        missing = pd.DataFrame({f: self.particles[f].isna().groupby(src).all() for f in feats})
+        odd = missing.index[missing.mean(axis=1) >= 0.5]
+        lines = []
+        for f in feats:
+            files = [x for x in missing.index[missing[f]] if x not in odd]
             if files:
                 self.roles.spec(f).role = "measure"
-                notes.append(f"'{f}' 값이 없는 파일이 있어 분석에서 뺐습니다 ({', '.join(files)}). "
-                             "데이터 탭에서 다시 켜면 그 파일의 입자는 모두 제외됩니다.")
-        return notes
+                lines.append(f"• '{f}' 측정값을 분석에서 뺐습니다 (없는 파일: {', '.join(files)})")
+        for x in odd:
+            cols = [f for f in feats if missing.at[x, f]]
+            lines.append(f"• {x}: 측정값 {len(cols)}개({', '.join(cols[:4])}{'…' if len(cols) > 4 else ''})가 없어 "
+                         "이 파일의 입자는 분석에서 빠집니다. 열 이름이 다른 형식의 파일인지 확인하세요.")
+        if not lines:
+            return []
+        return ["파일마다 있는 측정값이 다릅니다.\n" + "\n".join(lines) +
+                "\n\n데이터 탭의 '열 역할'에서 바꿀 수 있습니다."]
 
     def save(self, path):
         path = Path(path)
@@ -119,3 +133,17 @@ def _plain(o):
     if isinstance(o, (set, frozenset, tuple)):
         return list(o)
     return str(o)
+
+
+def _read_unique(paths, have: set):
+    """Read files, skipping any whose measurements are already loaded (or repeated in this batch)."""
+    frames, notes = [], []
+    for p in paths:
+        f = read_particle_csv(p)
+        d = content_digest(f.drop(columns=["source_file"]))
+        if d in have:
+            notes.append(f"{Path(p).name}: 같은 내용의 데이터가 이미 있어 건너뛰었습니다 ({p}).")
+            continue
+        have.add(d)
+        frames.append(f)
+    return frames, notes
