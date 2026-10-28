@@ -4,11 +4,14 @@ from __future__ import annotations
 import pandas as pd
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from ..core.batches import UNASSIGNED
 from .common import FlowLayout, info_label, section, short_group
+
+KIND = QtCore.Qt.UserRole + 1       # tree item kind: batch / group / delivery-head / delivery
 
 
 class GroupPanel(QtWidgets.QWidget):
-    """Groups with a check box each (checked = shown on the particle map), ★ = reference group.
+    """Batches with their groups underneath (checked = shown on the particle map), ★ = reference.
     A condition filter checks only the groups with a chosen condition value."""
     visible_changed = QtCore.Signal()
     references_changed = QtCore.Signal()
@@ -18,21 +21,22 @@ class GroupPanel(QtWidgets.QWidget):
         self.project = None
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(6, 6, 4, 6)
-        head = QtWidgets.QLabel("그룹")
+        head = QtWidgets.QLabel("배치 › 그룹")
         f = head.font(); f.setBold(True); f.setPointSize(f.pointSize() + 1); head.setFont(f)
         lay.addWidget(head)
-        lay.addWidget(info_label("체크한 그룹만 지도에 표시합니다. ★ = 기준 그룹 (오른쪽 클릭으로 지정)."))
-        self.list = QtWidgets.QListWidget()
-        self.list.setWordWrap(True)
-        self.list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        self.list.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
-        self.list.customContextMenuRequested.connect(self._menu)
-        self.list.itemChanged.connect(lambda _it: self.visible_changed.emit())
-        self.list.setTextElideMode(QtCore.Qt.ElideNone)
-        self.list.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self.list.setResizeMode(QtWidgets.QListView.Adjust)
-        self.list.setStyleSheet("QListWidget::item{padding:3px 2px;}")
-        lay.addWidget(self.list, 1)
+        lay.addWidget(info_label("체크한 입자 형성 그룹만 지도에 표시합니다. 배치를 체크하면 그 아래 그룹이 함께 바뀝니다. "
+                                 "★ = 기준 (오른쪽 클릭으로 지정)."))
+        self.tree = QtWidgets.QTreeWidget()
+        self.tree.setHeaderHidden(True)
+        self.tree.setWordWrap(True)
+        self.tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.tree.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._menu)
+        self.tree.itemChanged.connect(self._item_changed)
+        self.tree.setTextElideMode(QtCore.Qt.ElideNone)
+        self.tree.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.tree.setStyleSheet("QTreeWidget::item{padding:2px 1px;}")
+        lay.addWidget(self.tree, 1)
 
         self.cond = QtWidgets.QComboBox()
         self.value = QtWidgets.QComboBox()
@@ -48,6 +52,17 @@ class GroupPanel(QtWidgets.QWidget):
         self.count = QtWidgets.QLabel(""); self.count.setStyleSheet("color:#666;")
         lay.addWidget(self.count)
 
+    # ---- items --------------------------------------------------------
+    def _group_items(self):
+        out = []
+        for i in range(self.tree.topLevelItemCount()):
+            b = self.tree.topLevelItem(i)
+            for j in range(b.childCount()):
+                it = b.child(j)
+                if it.data(0, KIND) == "group":
+                    out.append(it)
+        return out
+
     def set_project(self, project):
         self.project = project
         self.refresh()
@@ -56,40 +71,82 @@ class GroupPanel(QtWidgets.QWidget):
         p = self.project
         if p is None:
             return
-        prev = self.visible_groups() if self.list.count() else None
+        prev = self.visible_groups() if self.tree.topLevelItemCount() else None
+        known = getattr(self, "_known", set()) if prev is not None else set()
+        self._known = set(p.groups)
         counts = p.particles.groupby("group").size()
-        t = p.conditions
-        self.list.blockSignals(True)
-        self.list.clear()
-        for g in p.groups:
-            star = "★ " if g in t.references else ""
-            it = QtWidgets.QListWidgetItem(f"{star}{g}")
-            it.setData(QtCore.Qt.UserRole, g)
-            it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
-            it.setCheckState(QtCore.Qt.Checked if prev is None or g in prev else QtCore.Qt.Unchecked)
-            tip = [f"<b>{g}</b>", f"입자 {int(counts.get(g, 0)):,}개"]
-            for c in t.schema:
-                v = t.value(g, c.name)
-                tip.append(f"{c.label}: {'—' if v is None else v}")
-            it.setToolTip("<br>".join(tip))
-            if star:
-                it.setForeground(QtGui.QColor("#8a6d00"))
-            self.list.addItem(it)
-        self.list.blockSignals(False)
+        view = p.view
+        refs, brefs = p.conditions.references, p.batches.references
+        self.tree.blockSignals(True)
+        self.tree.clear()
+        for b in p.batches.names():
+            form = p.batches.groups_in(b, p.groups)
+            deliv = p.batches.groups_in(b, p.delivery.groups())
+            if not form and not deliv and b == UNASSIGNED:
+                continue
+            bi = QtWidgets.QTreeWidgetItem([("★ " if b in brefs else "") + f"{b}  ({len(form)})"])
+            bi.setData(0, QtCore.Qt.UserRole, b); bi.setData(0, KIND, "batch")
+            bf = bi.font(0); bf.setBold(True); bi.setFont(0, bf)
+            bi.setFlags(bi.flags() | QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsAutoTristate)
+            if b == UNASSIGNED:
+                bi.setForeground(0, QtGui.QColor("#b05a00"))
+            tip = [f"<b>{b}</b>", f"입자 형성 그룹 {len(form)}개 · 세포 전달 그룹 {len(deliv)}개"]
+            if b in p.batches.table.values.index:
+                for c in p.batches.table.schema:
+                    v = p.batches.table.value(b, c.name)
+                    tip.append(f"{c.label}: {'—' if v is None else v}")
+            bi.setToolTip(0, "<br>".join(tip))
+            self.tree.addTopLevelItem(bi)
+            for g in form:
+                star = "★ " if g in refs else ""
+                it = QtWidgets.QTreeWidgetItem([f"{star}{short_group(g, 60)}"])     # full name in the tooltip
+                it.setData(0, QtCore.Qt.UserRole, g); it.setData(0, KIND, "group")
+                it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
+                on = prev is None or g in prev or g not in known      # new groups start shown
+                it.setCheckState(0, QtCore.Qt.Checked if on else QtCore.Qt.Unchecked)
+                tip = [f"<b>{g}</b>", f"입자 {int(counts.get(g, 0)):,}개"]
+                for c in view.schema:
+                    v = view.value(g, c.name)
+                    tip.append(f"{c.label}: {'—' if v is None else v}")
+                it.setToolTip(0, "<br>".join(tip))
+                if star:
+                    it.setForeground(0, QtGui.QColor("#8a6d00"))
+                bi.addChild(it)
+            if deliv:
+                di = QtWidgets.QTreeWidgetItem([f"세포 전달 ({len(deliv)})"])
+                di.setData(0, KIND, "delivery-head")
+                di.setFlags(QtCore.Qt.ItemIsEnabled)
+                di.setForeground(0, QtGui.QColor("#5b6b8a"))
+                for g in deliv:
+                    used = p.delivery.uses.get(g)
+                    ci = QtWidgets.QTreeWidgetItem([g])
+                    ci.setData(0, QtCore.Qt.UserRole, g); ci.setData(0, KIND, "delivery")
+                    ci.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
+                    ci.setForeground(0, QtGui.QColor("#5b6b8a"))
+                    ci.setToolTip(0, f"<b>{g}</b><br>사용한 입자: {used or '—'}")
+                    di.addChild(ci)
+                bi.addChild(di)
+            bi.setExpanded(True)
+        self.tree.blockSignals(False)
         cur = self.cond.currentText()
         self.cond.blockSignals(True); self.cond.clear()
-        for c in t.schema:
+        for c in view.schema:
             self.cond.addItem(c.name)
         i = self.cond.findText(cur); self.cond.setCurrentIndex(max(i, 0))
         self.cond.blockSignals(False)
         self._fill_values()
         self._update_count()
 
+    def _item_changed(self, it, _col):
+        if it.data(0, KIND) in ("group", "batch"):
+            self._update_count()
+            self.visible_changed.emit()
+
     def _fill_values(self):
         self.value.clear()
         if self.project is None or not self.cond.currentText():
             return
-        vals = self.project.conditions.categorical(self.cond.currentText())
+        vals = self.project.view.categorical(self.cond.currentText())
         levels = sorted(vals.dropna().unique(), key=_sort_key)
         for v in levels:
             self.value.addItem(str(v))
@@ -100,62 +157,77 @@ class GroupPanel(QtWidgets.QWidget):
         name, val = self.cond.currentText(), self.value.currentText()
         if not name:
             return
-        vals = self.project.conditions.categorical(name)
-        self.list.blockSignals(True)
-        for i in range(self.list.count()):
-            it = self.list.item(i)
-            v = vals.get(it.data(QtCore.Qt.UserRole))
+        vals = self.project.view.categorical(name)
+        self.tree.blockSignals(True)
+        for it in self._group_items():
+            v = vals.get(it.data(0, QtCore.Qt.UserRole))
             ok = (pd.isna(v) and val == "기록 안 함") or (not pd.isna(v) and str(v) == val)
-            it.setCheckState(QtCore.Qt.Checked if ok else QtCore.Qt.Unchecked)
-        self.list.blockSignals(False)
+            it.setCheckState(0, QtCore.Qt.Checked if ok else QtCore.Qt.Unchecked)
+        self.tree.blockSignals(False)
         self._update_count()
         self.visible_changed.emit()
 
     def _check_all(self, on):
-        self.list.blockSignals(True)
-        for i in range(self.list.count()):
-            self.list.item(i).setCheckState(QtCore.Qt.Checked if on else QtCore.Qt.Unchecked)
-        self.list.blockSignals(False)
+        self.tree.blockSignals(True)
+        for it in self._group_items():
+            it.setCheckState(0, QtCore.Qt.Checked if on else QtCore.Qt.Unchecked)
+        self.tree.blockSignals(False)
         self._update_count()
         self.visible_changed.emit()
 
     def _update_count(self):
         n = len(self.visible_groups())
-        self.count.setText(f"지도에 표시: {n}/{self.list.count()}개 그룹")
+        self.count.setText(f"지도에 표시: {n}/{len(self._group_items())}개 그룹")
 
     def visible_groups(self) -> set:
-        return {self.list.item(i).data(QtCore.Qt.UserRole) for i in range(self.list.count())
-                if self.list.item(i).checkState() == QtCore.Qt.Checked}
+        return {it.data(0, QtCore.Qt.UserRole) for it in self._group_items()
+                if it.checkState(0) == QtCore.Qt.Checked}
 
     def set_visible_groups(self, groups):
         groups = set(groups)
-        self.list.blockSignals(True)
-        for i in range(self.list.count()):
-            it = self.list.item(i)
-            it.setCheckState(QtCore.Qt.Checked if it.data(QtCore.Qt.UserRole) in groups else QtCore.Qt.Unchecked)
-        self.list.blockSignals(False)
+        self.tree.blockSignals(True)
+        for it in self._group_items():
+            it.setCheckState(0, QtCore.Qt.Checked if it.data(0, QtCore.Qt.UserRole) in groups else QtCore.Qt.Unchecked)
+        self.tree.blockSignals(False)
         self._update_count()
 
     def _menu(self, pos):
-        sel = [it.data(QtCore.Qt.UserRole) for it in self.list.selectedItems()]
-        if not sel or self.project is None:
+        items = self.tree.selectedItems()
+        groups = [it.data(0, QtCore.Qt.UserRole) for it in items if it.data(0, KIND) == "group"]
+        batches = [it.data(0, QtCore.Qt.UserRole) for it in items if it.data(0, KIND) == "batch"
+                   and it.data(0, QtCore.Qt.UserRole) != UNASSIGNED]
+        if (not groups and not batches) or self.project is None:
             return
         m = QtWidgets.QMenu(self)
-        refs = self.project.conditions.references
-        a_on = m.addAction("기준 그룹(★)으로 지정")
-        a_off = m.addAction("기준 그룹 해제")
-        m.addSeparator()
-        a_show = m.addAction("이 그룹만 지도에 표시")
-        act = m.exec(self.list.mapToGlobal(pos))
-        if act is a_on:
-            refs.update(sel)
-        elif act is a_off:
-            refs.difference_update(sel)
-        elif act is a_show:
-            self.set_visible_groups(sel)
-            self.visible_changed.emit()
+        acts = {}
+        if groups:
+            acts[m.addAction("기준 그룹(★)으로 지정")] = ("ref", groups)
+            acts[m.addAction("기준 그룹 해제")] = ("unref", groups)
+            m.addSeparator()
+            acts[m.addAction("이 그룹만 지도에 표시")] = ("show", groups)
+        if batches:
+            if groups:
+                m.addSeparator()
+            acts[m.addAction("기준 배치(★)로 지정")] = ("bref", batches)
+            acts[m.addAction("기준 배치 해제")] = ("bunref", batches)
+            acts[m.addAction("이 배치만 지도에 표시")] = ("bshow", batches)
+        act = m.exec(self.tree.mapToGlobal(pos))
+        if act not in acts:
             return
+        what, names = acts[act]
+        p = self.project
+        if what == "ref":
+            p.conditions.references.update(names)
+        elif what == "unref":
+            p.conditions.references.difference_update(names)
+        elif what == "bref":
+            p.batches.references.update(names)
+        elif what == "bunref":
+            p.batches.references.difference_update(names)
         else:
+            show = names if what == "show" else [g for b in names for g in p.batches.groups_in(b, p.groups)]
+            self.set_visible_groups(show)
+            self.visible_changed.emit()
             return
         self.refresh()
         self.references_changed.emit()

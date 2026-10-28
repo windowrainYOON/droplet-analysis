@@ -21,6 +21,7 @@ class MapPage(QtCore.QObject):
     run_requested = QtCore.Signal()                 # recompute the current map level
     submap_requested = QtCore.Signal(object, str)   # particle row indices, name
     inputs_changed = QtCore.Signal()                # measurements / groups going into the map
+    batch_maps_requested = QtCore.Signal()          # one map per batch, each computed on its own
     weights_note = "가중치는 오른쪽 '측정값 가중치' 탭에서 바꿉니다."
     title = "입자 지도"
 
@@ -64,9 +65,13 @@ class MapPage(QtCore.QObject):
         self.cluster_canvas = MplCanvas(None, 5, 3)
         self.comp_canvas = MplCanvas(None, 5, 3)
         self.sel_canvas = MplCanvas(None, 5, 3)
+        self.batch_canvas = MplCanvas(None, 6, 4)
         self.bottom.addTab(self.cluster_canvas, "군집 해석")
         self.bottom.addTab(self.comp_canvas, "그룹별 군집 구성")
         self.bottom.addTab(self.sel_canvas, "선택 영역 요약")
+        self.bottom.addTab(self.batch_canvas, "배치별 지도")
+        self.batch_maps = None      # {batch: ParticleMap} computed per batch, or None
+        self.batch_canvas.message("배치가 둘 이상이면 지금 지도를 배치마다 나눠 보여 줍니다.")
         split.addWidget(self.bottom)
         split.setStretchFactor(0, 3); split.setStretchFactor(1, 2)
         lay.addWidget(split, 1)
@@ -144,6 +149,19 @@ class MapPage(QtCore.QObject):
         self.select_btn = QtWidgets.QPushButton("영역 선택"); self.select_btn.setCheckable(True)
         self.select_btn.toggled.connect(self._toggle_roi)
         sel_row = QtWidgets.QWidget(); fl = FlowLayout(sel_row); fl.addWidget(self.select_btn)
+        self.batch_pick = QtWidgets.QComboBox()
+        self.batch_mode = QtWidgets.QComboBox()
+        self.batch_mode.addItem("지금 지도를 배치마다 나눠 보기 (같은 좌표·같은 군집)", "split")
+        self.batch_mode.addItem("배치마다 따로 계산한 지도 (군집 번호는 배치마다 다름)", "own")
+        self.batch_mode.currentIndexChanged.connect(self._batch_mode_changed)
+        batch_sec = section("배치",
+                            info_label("전체 지도 = 모든 배치의 입자를 한 지도에 (색칠을 '조건: 배치'로 두면 배치 차이가 보입니다). "
+                                       "배치 안 지도 = 고른 배치의 입자만으로 다시 계산해 그 배치 안의 군집을 봅니다. "
+                                       "배치별 지도 = 아래 '배치별 지도' 탭."),
+                            form([("배치", self.batch_pick)]),
+                            flow_buttons((("이 배치만으로 지도", self._submap_batch),)),
+                            form([("배치별 지도", self.batch_mode)]),
+                            flow_buttons((("배치별 지도 그리기", self._show_batch_maps),)))
         hier = section("계층 지도 (하위 지도)",
                        info_label("고른 군집이나 선택 영역의 입자만으로 UMAP과 군집을 다시 계산합니다. "
                                   "하위 지도에서는 측정값을 그 입자들 안에서 다시 표준화하므로 작은 차이가 더 벌어져 보입니다. "
@@ -153,7 +171,7 @@ class MapPage(QtCore.QObject):
                                      ("선택 영역 → 하위 지도", self._submap_roi),
                                      ("상위 지도로", self.go_up))),
                        sel_row)
-        self.panel = scroll_panel(calc, inputs, dots, hier)
+        self.panel = scroll_panel(calc, inputs, dots, batch_sec, hier)
 
     def _dspin(self, lo, hi, val, step, suffix, tip):
         s = QtWidgets.QDoubleSpinBox(); s.setRange(lo, hi); s.setValue(val); s.setSingleStep(step)
@@ -171,6 +189,8 @@ class MapPage(QtCore.QObject):
         self._skip_values = {k: set(map(str, v)) for k, v in s.map_skip_values.items()}
         self.only_visible.blockSignals(True); self.only_visible.setChecked(bool(s.map_skip_groups)); self.only_visible.blockSignals(False)
         self._fill_options()
+        self._fill_batches()
+        self.batch_maps = None
         self.fill_inputs()
         self._draw_crumbs()
 
@@ -201,7 +221,7 @@ class MapPage(QtCore.QObject):
         self.map_feats.blockSignals(False)
         cur = self.skip_cond.currentText()
         self.skip_cond.blockSignals(True); self.skip_cond.clear()
-        for c in self.project.conditions.schema:
+        for c in self.project.view.schema:
             self.skip_cond.addItem(c.name)
         i = self.skip_cond.findText(cur); self.skip_cond.setCurrentIndex(max(i, 0))
         self.skip_cond.blockSignals(False)
@@ -211,7 +231,7 @@ class MapPage(QtCore.QObject):
         self.skip_vals.blockSignals(True); self.skip_vals.clear()
         name = self.skip_cond.currentText()
         if self.project is not None and name:
-            vals = self.project.conditions.categorical(name)
+            vals = self.project.view.categorical(name)
             skip = self._skip_values.get(name, set())
             levels = [str(v) for v in sorted(vals.dropna().unique(), key=_level_key)]
             if vals.isna().any():
@@ -265,7 +285,7 @@ class MapPage(QtCore.QObject):
         s = self.project.settings
         feats = self.project.roles.features()
         n_f = len([f for f in feats if f not in s.map_skip_features])
-        skipped = map_skipped_groups(self.project.conditions, s)
+        skipped = map_skipped_groups(self.project.view, s)
         groups = self.project.groups
         n_g = len([g for g in groups if g not in skipped])
         self.inputs_summary.setText(f"지도 계산에 쓰는 값: 측정값 {n_f}/{len(feats)}개 · 그룹 {n_g}/{len(groups)}개")
@@ -306,7 +326,7 @@ class MapPage(QtCore.QObject):
         self.color_by.addItem("형태값 신뢰도 w", ("weight", None))
         names = []
         if self.project:
-            for c in self.project.conditions.schema:
+            for c in self.project.view.schema:
                 if c.kind == "numeric":
                     self.color_by.addItem(f"조건: {c.label} (단계별)", ("cond_lv", c.name))
                 self.color_by.addItem(f"조건: {c.label}", ("cond", c.name))
@@ -330,8 +350,17 @@ class MapPage(QtCore.QObject):
         i = self.unit_cond.findText(cur); self.unit_cond.setCurrentIndex(max(i, 0))
         self.unit_cond.blockSignals(False)
 
+    def _fill_batches(self):
+        cur = self.batch_pick.currentText()
+        self.batch_pick.clear()
+        if self.project is not None:
+            from ..core.batches import UNASSIGNED
+            self.batch_pick.addItems([b for b in self.project.batches.names() if b != UNASSIGNED])
+        i = self.batch_pick.findText(cur); self.batch_pick.setCurrentIndex(max(i, 0))
+
     def conditions_changed(self):
         self._fill_options()
+        self._fill_batches()
         self.fill_inputs()
         self.redraw()
 
@@ -346,6 +375,7 @@ class MapPage(QtCore.QObject):
     def set_result(self, result):
         """New full analysis: the map hierarchy restarts at the root."""
         self.result = result
+        self.batch_maps = None
         self.levels = [result.pmap] if result.pmap is not None else []
         self.set_stale("")
         self._fill_options()
@@ -391,6 +421,8 @@ class MapPage(QtCore.QObject):
         self.redraw()
         self._draw_clusters()
         self._draw_composition()
+        if self.batch_mode.currentData() == "split":
+            self.draw_batch_maps()
         self.plot.autoRange()
 
     def _draw_crumbs(self):
@@ -445,6 +477,76 @@ class MapPage(QtCore.QObject):
         name = "군집 " + "+".join(self._cname(c) for c in sel)
         self.submap_requested.emit(self.current_rows()[m], name)
 
+    def _submap_batch(self):
+        b = self.batch_pick.currentText()
+        if self.result is None or not b:
+            QtWidgets.QMessageBox.information(self.view, "배치 안 지도", "'분석 실행' 후에 배치를 고르세요."); return
+        d = self.result.prepared.data
+        rows = np.flatnonzero(d["group"].map(self.project.batch_of).eq(b).to_numpy())
+        if not len(rows):
+            QtWidgets.QMessageBox.information(self.view, "배치 안 지도", f"'{b}' 배치에 분석된 입자가 없습니다."); return
+        self.submap_requested.emit(rows, f"배치 {b}")
+
+    def _batch_mode_changed(self):
+        if self.batch_mode.currentData() == "split":
+            self.draw_batch_maps()
+
+    def _show_batch_maps(self):
+        self.bottom.setCurrentWidget(self.batch_canvas)
+        if self.batch_mode.currentData() == "own":
+            self.batch_maps_requested.emit()
+        else:
+            self.draw_batch_maps()
+
+    def set_batch_maps(self, maps):
+        self.batch_maps = maps
+        self.bottom.setCurrentWidget(self.batch_canvas)
+        self.draw_batch_maps()
+
+    def _batches_present(self, rows):
+        bs = self.result.prepared.data["group"].iloc[rows].map(self.project.batch_of)
+        return [b for b in self.project.batches.names() if (bs == b).any()], bs.to_numpy()
+
+    def draw_batch_maps(self):
+        c = self.batch_canvas
+        if self.result is None or self.current() is None:
+            c.message("'분석 실행' 후에 그립니다."); return
+        own = self.batch_mode.currentData() == "own"
+        if own and not self.batch_maps:
+            c.message("'배치별 지도 그리기'를 누르면 배치마다 지도를 따로 계산합니다."); return
+        c.clear()
+        if own:
+            panels = [(b, pm.umap, pm.clusters, None) for b, pm in self.batch_maps.items()]
+            title = "배치마다 따로 계산한 지도 — 색 = 그 배치 안의 군집"
+        else:
+            pm = self.current()
+            names, bs = self._batches_present(self.current_rows())
+            if len(names) < 2:
+                c.message("지금 지도에 배치가 하나뿐입니다."); return
+            panels = [(b, pm.umap, pm.clusters, bs == b) for b in names]
+            title = f"{pm.name} 지도를 배치마다 나눔 — 같은 좌표·같은 군집 번호"
+        n = len(panels)
+        cols = min(n, 3)
+        rows_n = int(np.ceil(n / cols))
+        for i, (b, xy, cl, mask) in enumerate(panels):
+            ax = c.fig.add_subplot(rows_n, cols, i + 1)
+            if mask is not None:
+                ax.scatter(xy[~mask, 0], xy[~mask, 1], s=1, color="#dddddd", rasterized=True)
+                xy, cl = xy[mask], cl[mask]
+            ax.scatter(xy[:, 0], xy[:, 1], s=2, c=[color(int(k)) for k in cl], rasterized=True)
+            comp = pd.Series(cl).value_counts(normalize=True).head(3)
+            top = ", ".join(f"{self._cname(k) if not own else k}:{v:.0%}" for k, v in comp.items())
+            ax.set_title(f"{b}  (입자 {len(cl):,})\n많은 군집 {top}", fontsize=8)
+            ax.set_xticks([]); ax.set_yticks([])
+        c.fig.suptitle(title, fontsize=9)
+        c.draw_idle()
+
+    def batch_rows(self) -> dict:
+        """Rows of the prepared data per batch (for per-batch maps)."""
+        d = self.result.prepared.data
+        b = d["group"].map(self.project.batch_of).to_numpy()
+        return {name: np.flatnonzero(b == name) for name in self.project.batches.names() if (b == name).any()}
+
     def _submap_roi(self):
         if self.sel_mask is None or self.roi is None or not self.sel_mask.any():
             QtWidgets.QMessageBox.information(self.view, "계층 지도", "'영역 선택'을 켜고 상자 안에 입자를 담으세요.")
@@ -466,12 +568,12 @@ class MapPage(QtCore.QObject):
         if kind == "cluster":
             return np.array([f"군집 {self._cname(c)}" for c in pm.clusters]), "cat"
         if kind == "cond_lv":
-            vals = self.project.conditions.categorical(key)
+            vals = self.project.view.categorical(key)
             return d["group"].map(vals).fillna("기록 안 함").to_numpy(), "cat"
         if kind == "cond":
-            if self.project.conditions.get(key).kind == "numeric":
-                return d["group"].map(self.project.conditions.numeric(key)).to_numpy(float), "num"
-            vals = self.project.conditions.categorical(key)
+            if self.project.view.get(key).kind == "numeric":
+                return d["group"].map(self.project.view.numeric(key)).to_numpy(float), "num"
+            vals = self.project.view.categorical(key)
             return d["group"].map(vals).fillna("기록 안 함").to_numpy(), "cat"
         if kind == "weight":
             return self.result.prepared.w[rows], "num"
@@ -491,14 +593,14 @@ class MapPage(QtCore.QObject):
         d = self.result.prepared.data.iloc[rows].reset_index(drop=True)
         xy = pm.umap
         kind, key = self.color_by.currentData() or ("group", None)
-        if kind in ("cond", "cond_lv") and key not in self.project.conditions.names():
+        if kind in ("cond", "cond_lv") and key not in self.project.view.names():
             kind, key = "group", None
         vals, vtype = self._values(kind, key, d, pm, rows)
         vis = self._visible_mask()
         shape_name = self.shape_by.currentData()
         shp = None
-        if shape_name and shape_name in self.project.conditions.names():
-            shp = d["group"].map(self.project.conditions.categorical(shape_name)).fillna("기록 안 함").to_numpy()
+        if shape_name and shape_name in self.project.view.names():
+            shp = d["group"].map(self.project.view.categorical(shape_name)).fillna("기록 안 함").to_numpy()
             shp_levels = sorted(pd.unique(shp[vis]), key=_level_key)
             sym_of = {v: SYMBOLS[i % len(SYMBOLS)] for i, v in enumerate(shp_levels)}
         unit = self.unit.currentData()
@@ -571,7 +673,7 @@ class MapPage(QtCore.QObject):
             self.plot.addItem(pg.ScatterPlotItem(px, py, size=psize, pen=pen, brush=brushes, symbol=psym))
             label = self.color_by.currentText().split(": ", 1)[-1]
             if kind == "cond":     # numeric condition: its recorded levels are the categories
-                cat = d["group"].map(self.project.conditions.categorical(key)).fillna("기록 안 함").to_numpy()
+                cat = d["group"].map(self.project.view.categorical(key)).fillna("기록 안 함").to_numpy()
                 self._show_cohesion(xy[vis], cat[vis], self.color_by.currentText())
             self.colorbar_label.setText(f"{label}: 어두운 보라 = {lo:.3g}  →  노랑 = {hi:.3g}   (회색 = 값 없음)")
 
@@ -603,7 +705,7 @@ class MapPage(QtCore.QObject):
         name = self.unit_cond.currentText()
         if not name:
             return None
-        vals = self.project.conditions.categorical(name)
+        vals = self.project.view.categorical(name)
         return d["group"].map(vals).to_numpy(object)
 
     def _key_label(self, unit, k):

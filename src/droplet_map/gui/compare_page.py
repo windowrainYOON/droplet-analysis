@@ -108,7 +108,7 @@ class ComparePage(QtCore.QObject):
     def _fill_conditions(self):
         if self.project is None:
             return
-        names = [c.name for c in self.project.conditions.schema]
+        names = [c.name for c in self.project.view.schema]
         for combo, extra in ((self.x_cond, []), (self.hue_cond, ["(없음)"])):
             cur = combo.currentText()
             combo.blockSignals(True); combo.clear()
@@ -118,7 +118,7 @@ class ComparePage(QtCore.QObject):
             combo.setCurrentIndex(i if i >= 0 else 0)
             combo.blockSignals(False)
         # sensible defaults: first numeric condition with >1 level on x, second on hue
-        t = self.project.conditions
+        t = self.project.view
         varied = [c.name for c in t.schema if t.categorical(c.name).nunique() > 1]
         if self.x_cond.currentText() not in varied and varied:
             self.x_cond.setCurrentText(varied[0])
@@ -151,7 +151,7 @@ class ComparePage(QtCore.QObject):
         c = self.trend
         if self.result is None or self.img_targets is None:
             return
-        t = self.project.conditions
+        t = self.project.view
         if not t.schema or not self.x_cond.currentText():
             c.message("조건 편집기에서 조건을 먼저 입력하세요."); return
         xname = self.x_cond.currentText()
@@ -235,9 +235,14 @@ class ComparePage(QtCore.QObject):
         ylabels = []
         for name in a.strength.index:
             why = ""
+            by_batch = a.level is not None and a.level.get(name) == "batch"
             if hidden[list(a.strength.index).index(name)]:
-                why = " · 값 1가지" if self.project.conditions.categorical(name).nunique() < 2 else " · 그룹 부족"
-            ylabels.append(f"{name} (n={a.n[name]}){why}")
+                if self.project.view.categorical(name).nunique() < 2:
+                    why = " · 값 1가지"
+                else:
+                    why = " · 배치 3개 미만" if by_batch else " · 그룹 부족"
+            unit = "배치" if by_batch else "그룹"
+            ylabels.append(f"{name} ({unit} n={a.n[name]}){why}")
         ax.set_yticks(range(M.shape[0]), ylabels, fontsize=8)
         c.fig.colorbar(im, ax=ax, label="연관 강도 (|ρ| 또는 ε²)", shrink=.8)
         c.draw_idle()
@@ -257,7 +262,7 @@ class ComparePage(QtCore.QObject):
         Dv = np.nan_to_num(D.to_numpy(), nan=np.nanmax(D.to_numpy()))
         order = leaves_list(linkage(squareform(Dv, checks=False), "average")) if len(D) > 2 else np.arange(len(D))
         g = [D.index[i] for i in order]
-        t = self.project.conditions
+        t = self.project.view
         strips = [x.name for x in t.schema if t.categorical(x.name).nunique() > 1][:5]
         hr = [0.35] * len(strips) + [6]
         gs = c.fig.add_gridspec(len(strips) + 1, 2, height_ratios=hr, width_ratios=[30, 1])
@@ -291,7 +296,7 @@ class ComparePage(QtCore.QObject):
         df = df.join(prof.image_stats)
         if r.score is not None:
             df["기준 score"] = r.score["score"].reindex(df.index)
-        t = self.project.conditions
+        t = self.project.view
         for cnd in t.schema:
             df[f"[조건] {cnd.name}"] = t.categorical(cnd.name).reindex(df.index)
         self.table.setSortingEnabled(False)

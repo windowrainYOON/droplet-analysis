@@ -54,6 +54,7 @@ def run() -> int:
     csv = tmp / "particles.csv"
     synthetic().to_csv(csv, index=False)
     w = MainWindow(); w.dirty = False
+    w.ask_batch = lambda what, n, project=None: "A"
     w.show()
     w.import_files([str(csv)])
     check("입자 CSV 자동 인식", w.project is not None and len(w.project.groups) == 8)
@@ -150,6 +151,78 @@ def run() -> int:
     w.run_analysis(); ok = wait(w)
     kept = set(w.result.prepared.data["source_file"]) if ok and w.result else set()
     check("측정값이 빠진 파일의 입자도 분석에 포함", {"particles.csv", "extra.csv"} <= kept)
+    # batches: a second batch with the same formation conditions, its particles partition more
+    bb = synthetic(seed=2)
+    bb["group"] = bb["group"].str.replace("TEST,", "TEST-B,", regex=False)
+    bb["CH1_partition"] *= 1.6
+    bcsv = tmp / "batch_b.csv"; bb.to_csv(bcsv, index=False)
+    w.ask_batch = lambda what, n, project=None: "B"
+    w.import_files([str(bcsv)])
+    bgroups = [g for g in w.project.groups if g.startswith("TEST-B")]
+    tb = pd.DataFrame({"group": bgroups})
+    tb["pH"] = tb["group"].str.extract(r"pH(\d+)")[0]
+    tb["NaCl (mM)"] = tb["group"].str.extract(r"(\d+)mM")[0]
+    bc = tmp / "conditions_b.csv"; tb.to_csv(bc, index=False, encoding="utf-8-sig")
+    w.import_files([str(bc)])
+    pr = w.project
+    check("배치 지정 (불러올 때)", pr.batches.names()[:2] == ["A", "B"] and {pr.batch_of(g) for g in bgroups} == {"B"}
+          and pr.view.names()[0] == "배치", ", ".join(pr.batches.names()))
+    w.cond_page.refresh_all()
+    check("조건 탭: 배치 표 + 그룹 표", w.cond_page.models["batch"].rowCount() == 2
+          and w.cond_page.models["formation"].rowCount() == len(pr.groups))
+    tree_batches = w.groups_panel.tree.topLevelItemCount()
+    nvis = len(w.groups_panel.visible_groups())
+    check("왼쪽 목록: 배치 › 그룹", tree_batches == 2 and nvis == len(pr.groups), f"배치 {tree_batches}개 · 표시 {nvis}/{len(pr.groups)}")
+    w.run_analysis(); ok = wait(w)
+    a = w.result.assoc if ok else None
+    check("조건 효과는 배치 안에서 계산", a is not None and a.level["pH"] == "group" and a.level["배치"] == "batch"
+          and a.strength.loc["pH"].max() > 0.7)
+    bp = w.batch_page
+    check("배치 비교: 같은 조건 짝", len(bp.matched) == 7,   # one A group also has a 메모 value
+          f"{len(bp.matched)}가지")
+    bp.ref.setCurrentText("A"); bp.compute_score(); app.processEvents()
+    from .core.batch_compare import batch_summary
+    summ = batch_summary(bp.score) if bp.score is not None else None
+    check("기준 배치 score", summ is not None and summ.at["A", "평균 score"] > 99 and summ.at["B", "평균 score"] < summ.at["A", "평균 score"],
+          "" if summ is None else f"A {summ.at['A', '평균 score']:.0f} · B {summ.at['B', '평균 score']:.0f}")
+    mp.batch_pick.setCurrentText("B"); mp._submap_batch(); ok = wait(w)
+    on = set(w.result.prepared.data["group"].iloc[mp.current().idx]) if ok and mp.current().idx is not None else set()
+    check("배치 안 지도", ok and len(mp.levels) == 2 and on == set(bgroups), mp.current().name)
+    mp.go_to(0)
+    mp.batch_mode.setCurrentIndex(0); mp._show_batch_maps(); app.processEvents()
+    check("배치별 지도 (같은 좌표)", len(mp.batch_canvas.fig.axes) == 2)
+    mp.batch_mode.setCurrentIndex(1); mp._show_batch_maps(); ok = wait(w)
+    check("배치별 지도 (따로 계산)", ok and mp.batch_maps is not None and set(mp.batch_maps) == {"A", "B"}
+          and len(mp.batch_canvas.fig.axes) == 2)
+    # cell delivery: summary CSV, linked to the formation group whose particles were used
+    rows = []
+    for t in (0, 10):
+        g = f"1uM AHP-r568, 5uM FITC-PRD, 10% PEG, {t}min"
+        for region, base in (("particle", 500.0), ("cyto - particle", 50.0)):
+            for par in ("area_um2", "particle_threshold", "CH1_Mean", "CH2_Mean"):
+                rows.append({"group": g, "region": region, "n_images": 3, "parameter": par, "n": 10,
+                             "mean": base * (1 + t / 10), "sd": base / 10, "min": 0.0, "max": base * 3})
+    dcsv = tmp / "particle_intensity_summary_group.csv"; pd.DataFrame(rows).to_csv(dcsv, index=False)
+    w.ask_batch = lambda what, n, project=None: "A"
+    w.import_files([str(dcsv)])
+    d = w.project.delivery
+    check("세포 전달 CSV 자동 인식", len(d.groups()) == 2 and all(w.project.batch_of(g) == "A" for g in d.groups()))
+    w.cond_page.group_tabs.setCurrentIndex(1)
+    w.cond_page.fill_from_names()
+    check("세포 전달 조건 (이름에서)", d.conditions.value(d.groups()[1], "시간") == "10")
+    d.uses[d.groups()[0]] = w.project.groups[2]
+    w._conditions_changed(); app.processEvents()
+    dp = w.delivery_page
+    dp.refresh_link()
+    linked = dp.link.rowCount() == 2 and any("입자 기준 score" == dp.link.horizontalHeaderItem(j).text()
+                                             for j in range(dp.link.columnCount()))
+    check("세포 전달 그림 + 사용한 입자와 잇기", bool(dp.plot.fig.axes) and linked)
+    proj2 = tmp / "batches.dmap"
+    w.project.path = proj2; w.save()
+    back = Project.load(proj2)
+    check("배치·세포 전달 저장·열기", back.batches.of == w.project.batches.of and back.delivery.uses == d.uses
+          and back.delivery.conditions.names() == d.conditions.names())
+    w._mark_dirty()
     w.project.path = tmp / "no_such_dir" / "x.dmap"
     check("저장 실패 시 오류 표시 (앱 계속 동작)", w.save() is False and w.dirty)
     w.dirty = False

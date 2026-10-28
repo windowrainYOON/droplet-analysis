@@ -11,11 +11,14 @@ UI text and replies to the user are Korean; code, commits and docs in English ar
 | `core/io.py` | read particle CSVs, guess column roles, `classify_file` for auto-detect import |
 | `core/conditions.py` | condition schema + per-group values (blank = not recorded, never 0), CSV merge, fill-from-names helper |
 | `core/analysis.py` | size reliability weight, robust z, UMAP + Leiden (`particle_map`, also on a subset = hierarchical map), group profiles, Wasserstein distance, reference score, association |
-| `core/project.py` | `.dmap` zip: particles, roles, conditions, settings, ui state, work log |
+| `core/batches.py` | purification batches above groups: batch table + group → batch membership, migration from the old '정제 배치' condition, merged read-only condition view (`Project.view`) |
+| `core/delivery.py` | cell delivery summaries (group × region × parameter), ratios, delivery conditions from names, link to the formation group used |
+| `core/batch_compare.py` | groups paired across batches by identical formation conditions: batch distance, per-measurement delta, reference-batch score |
+| `core/project.py` | `.dmap` zip (format 2): particles, roles, conditions, batches, delivery, settings, ui state, work log |
 | `gui/main_window.py` | three panes, menus, auto-detect import / drag & drop, work log, background `Task`, export |
-| `gui/side_panels.py` | left group list (visibility, ★ reference, condition filter); shared measurement-weight panel |
-| `gui/map_page.py` | particle map: dot unit, colouring, cohesion readout, region selection, hierarchical sub-maps |
-| `gui/compare_page.py`, `score_page.py`, `data_page.py`, `conditions_page.py` | one feature each; each exposes `.view` (center) and `.panel` (right) |
+| `gui/side_panels.py` | left batch › group tree (visibility, ★ reference group/batch, condition filter); shared measurement-weight panel |
+| `gui/map_page.py` | particle map: dot unit, colouring, cohesion readout, region selection, hierarchical sub-maps, map inputs, within-batch map, per-batch maps |
+| `gui/compare_page.py`, `score_page.py`, `data_page.py`, `conditions_page.py` (batch table + formation/delivery group tables), `batch_page.py`, `delivery_page.py` | one feature each; each exposes `.view` (center) and `.panel` (right) |
 | `gui/export_page.py` | export dialog + `write_exports` |
 | `selftest.py` | headless end-to-end test on synthetic data (`--selftest`) |
 
@@ -23,6 +26,7 @@ UI text and replies to the user are Korean; code, commits and docs in English ar
 
 - Layout: left list · center view (only pane that grows) · right settings tabs; pane widths remembered.
 - One menu per feature (`탭 열기` + that feature's save/load). No save/load buttons inside panels. `파일` = common things only.
+- Batch (purification) is the level above groups; formation and delivery conditions depend on it. Formation-condition effects are judged within batches.
 - Conditions are entered by the user; group names are parsed only by the explicit "그룹 이름에서 조건 채우기" button (fills blanks only).
 - Shape values are trusted less for small particles (w(d)), never silently.
 - Commit and push every change; rebuild with `scripts/build_mac.sh` (installs to /Applications, DMG `Droplet Map-<ver>-<commit>_apple silicon.dmg` on the Desktop).
@@ -42,3 +46,4 @@ UI text and replies to the user are Korean; code, commits and docs in English ar
 | 0.2.3 | Duplicate files detected by content, not name; each file gets a unique source label (`folder/particle_shape.csv`); a file lacking most measurements is left out on its own instead of switching measurements off for every file; one merged note |
 | 0.2.4 | Adding files to an open project: a file of another format (e.g. ImageJ) no longer brings its columns in as measurements, so a missing-measurement file is still handled; "different format" is judged against the measurements most particles have; clearer note |
 | 0.2.5 | Particle map can leave out measurements and groups (by condition value or the left-list checks) without touching the score/comparison; settings saved in the project |
+| 0.3.0 | Batch hierarchy: batch table with batch conditions, every group belongs to a batch (asked on import), left tree batch › groups; formation-condition effects judged within batches; batch comparison tab (paired by identical conditions, reference-batch score); within-batch and per-batch maps; cell delivery summaries (inside particle / cytoplasm intensity, ratio) linked to the formation group used; project format 2 with migration |
