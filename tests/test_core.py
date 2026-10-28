@@ -108,3 +108,58 @@ def test_sub_map(project):
     idx = np.flatnonzero(p.data["group"].str.endswith("pH5").to_numpy())
     pm = particle_map(p, s, idx=idx, name="pH5")
     assert pm.umap.shape == (len(idx), 2) and len(pm.clusters) == len(idx) and pm.name == "pH5"
+
+
+def _write(df, path):
+    df.to_csv(path, index=False)
+    return path
+
+
+def test_multi_csv_missing_column_duplicates_and_image_names(tmp_path):
+    df = synthetic(n_groups=4)
+    a = _write(df[df["group"].str.contains("pH5|pH6")], tmp_path / "a.csv")
+    b = _write(df[~df["group"].str.contains("pH5|pH6")].drop(columns=["CH1_partition"]), tmp_path / "b.csv")
+    pr = Project.from_csv([a, b])
+    assert "CH1_partition" not in pr.roles.features() and any("CH1_partition" in n for n in pr.notes)
+    r = run_all(pr.particles, pr.roles, pr.conditions, Settings(), with_map=False)
+    assert set(r.prepared.data["source_file"]) == {"a.csv", "b.csv"}      # no file silently dropped
+    n = len(pr.particles)
+    notes = pr.add_csv([a])
+    assert len(pr.particles) == n and notes                             # same file not added twice
+    c = _write(df[df["group"].str.contains("pH5")], tmp_path / "c.csv")  # same group + image names
+    pr.add_csv([c])
+    imgs = pr.particles[pr.particles["source_file"] == "c.csv"]["image"]
+    assert imgs.str.startswith("c:").all()
+
+
+def test_numeric_looking_names_survive_save(tmp_path):
+    df = synthetic(n_groups=2)
+    df["group"] = np.where(df["group"].str.contains("pH5"), "01", "002")
+    p = _write(df, tmp_path / "n.csv")
+    pr = Project.from_csv([p])
+    assert set(pr.groups) == {"01", "002"}
+    pr.conditions.add_condition(ConditionDef("pH", "numeric"))
+    pr.conditions.set_value("01", "pH", "5")
+    pr.save(tmp_path / "n.dmap")
+    back = Project.load(tmp_path / "n.dmap")
+    assert set(back.groups) == {"01", "002"} and back.conditions.value("01", "pH") == "5"
+
+
+def test_failed_save_keeps_previous_file(tmp_path, project):
+    path = tmp_path / "keep.dmap"
+    project.save(path)
+    before = path.read_bytes()
+    project.ui = {"bad": object()}        # serialisable via the fallback, so force a real failure:
+    project.particles = None
+    with pytest.raises(Exception):
+        project.save(path)
+    assert path.read_bytes() == before and not (tmp_path / "keep.dmap.saving").exists()
+
+
+def test_classify_imagej_results(tmp_path):
+    from droplet_map.core.io import classify_file
+    df = pd.DataFrame({" ": range(1, 51), "Area": np.random.rand(50), "Circ.": np.random.rand(50),
+                       "Solidity": np.random.rand(50)})
+    assert classify_file(_write(df, tmp_path / "Results.csv")) == "particles"
+    cond = pd.DataFrame({"group": ["a", "b"], "pH": [5, 6]})
+    assert classify_file(_write(cond, tmp_path / "cond.csv")) == "conditions"

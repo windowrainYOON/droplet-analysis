@@ -326,10 +326,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _open_particles(self, paths):
         try:
-            self.set_project(Project.from_csv(paths), dirty=True)
+            pr = Project.from_csv(paths)
         except Exception as e:
             warn(self, f"CSV를 읽지 못했습니다.\n{e}"); return
+        self.set_project(pr, dirty=True)
+        self.log(f"입자 CSV {len(paths)}개 열기: " + ", ".join(Path(p).name for p in paths))
+        self._show_notes(pr.notes)
         self._set_tab_open(self.cond_page, True)
+
+    def _show_notes(self, notes):
+        for n in notes:
+            self.log(n)
+        if notes:
+            QtWidgets.QMessageBox.information(self, "불러오기 확인", "\n\n".join(notes))
 
     def add_csv(self, paths=None):
         if not self._need_project():
@@ -338,12 +347,16 @@ class MainWindow(QtWidgets.QMainWindow):
             paths, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "입자 CSV 추가", str(Path.home()), "CSV (*.csv *.txt)")
             if not paths:
                 return
+        n0 = len(self.project.particles)
         try:
-            self.project.add_csv(paths)
+            notes = self.project.add_csv(paths)
         except Exception as e:
             warn(self, f"CSV를 추가하지 못했습니다.\n{e}"); return
-        self.set_project(self.project, dirty=True)
-        self.log("입자 CSV 추가: " + ", ".join(Path(p).name for p in paths))
+        added = len(self.project.particles) - n0
+        self.project.ui = self._ui_state()
+        self.set_project(self.project, dirty=self.dirty or added > 0)
+        self.log(f"입자 CSV 추가: 입자 {added:,}개 (" + ", ".join(Path(p).name for p in paths) + ")")
+        self._show_notes(notes)
 
     def import_files(self, paths=None):
         if not paths:
@@ -432,11 +445,21 @@ class MainWindow(QtWidgets.QMainWindow):
             return self.save_as()
         self._collect_settings()
         self.project.ui = self._ui_state()
-        self.log(f"프로젝트 저장: {self.project.path}")
-        self.project.save(self.project.path)
+        path = self.project.path
+        try:
+            self.project.save(path)
+        except Exception as e:
+            self.statusBar().showMessage("프로젝트를 저장하지 못했습니다.")
+            box = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Warning, "저장 실패",
+                                        f"프로젝트를 저장하지 못했습니다. 이전에 저장한 파일은 그대로 있습니다.\n\n{path}\n\n{e}",
+                                        parent=self)
+            box.setDetailedText(traceback.format_exc())
+            box.exec()
+            return False
+        self.log(f"프로젝트 저장: {path}")
         self.dirty = False
         self._update_title()
-        self._add_recent(self.project.path)
+        self._add_recent(path)
         return True
 
     def save_as(self) -> bool:
@@ -546,6 +569,14 @@ class MainWindow(QtWidgets.QMainWindow):
         for p in (self.map_page, self.compare_page, self.score_page):
             p.set_result(result)
         self.map_page.set_visible_groups(self.groups_panel.visible_groups())
+        kept = result.prepared.data["group"].value_counts()
+        lost = [g for g in self.project.groups if kept.get(g, 0) == 0]
+        if lost:
+            msg = (f"QC와 빈 측정값 때문에 입자가 하나도 남지 않은 그룹이 {len(lost)}개 있습니다:\n"
+                   + "\n".join(lost[:15]) + ("\n…" if len(lost) > 15 else "")
+                   + "\n\n데이터 탭에서 최소 픽셀 수나 측정값 선택을 확인하세요.")
+            self.log(msg.splitlines()[0])
+            QtWidgets.QMessageBox.warning(self, "분석 확인", msg)
         n_cl = len(set(result.pmap.clusters)) if result.pmap is not None else 0
         self.log(f"분석 완료 ({dt:.1f}초) — 입자 {len(result.prepared.data):,}개 (QC 제외 {result.prepared.n_dropped:,}개), 군집 {n_cl}개")
         self._mark_dirty()

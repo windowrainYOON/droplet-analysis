@@ -117,6 +117,23 @@ def run() -> int:
     from .core.project import Project
     back = Project.load(proj)
     check("프로젝트 저장·열기", back.conditions.to_dict() == w.project.conditions.to_dict() and bool(back.ui) and bool(back.log))
+    # several CSVs: a file without one measurement, the same file twice; failed save
+    QtWidgets.QMessageBox.information = staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Ok)
+    QtWidgets.QMessageBox.warning = staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Ok)
+    QtWidgets.QMessageBox.question = staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Yes)
+    QtWidgets.QMessageBox.exec = lambda self: 0
+    extra = synthetic(n_groups=2, seed=1).drop(columns=["CH1_partition"])
+    extra["group"] = "EXTRA, " + extra["group"]
+    b = tmp / "extra.csv"; extra.to_csv(b, index=False)
+    n0 = len(w.project.particles)
+    w.import_files([str(b), str(csv)])
+    n1 = len(w.project.particles)
+    check("여러 CSV 추가 (같은 파일은 건너뜀)", n1 == n0 + len(extra), f"{n0:,} → {n1:,}")
+    w.run_analysis(); ok = wait(w)
+    kept = set(w.result.prepared.data["source_file"]) if ok and w.result else set()
+    check("측정값이 빠진 파일의 입자도 분석에 포함", {"particles.csv", "extra.csv"} <= kept)
+    w.project.path = tmp / "no_such_dir" / "x.dmap"
+    check("저장 실패 시 오류 표시 (앱 계속 동작)", w.save() is False and w.dirty)
     w.dirty = False
     w.close()
     n_fail = checks.count(False)

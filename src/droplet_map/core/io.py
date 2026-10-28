@@ -64,7 +64,8 @@ class ColumnRoles:
 def read_particle_csv(path: str | Path) -> pd.DataFrame:
     """Read one CSV exported by the image analysis step (UTF-8 with or without BOM)."""
     path = Path(path)
-    df = pd.read_csv(path, encoding="utf-8-sig")
+    # group / image names stay text: "01" must not turn into 1
+    df = pd.read_csv(path, encoding="utf-8-sig", dtype={"group": str, "image": str}, keep_default_na=True)
     df.columns = [str(c).strip() for c in df.columns]
     if "group" not in df.columns:
         # One file = one group when the file has no group column.
@@ -77,8 +78,25 @@ def read_particle_csv(path: str | Path) -> pd.DataFrame:
     return df
 
 
-def load_particles(paths) -> pd.DataFrame:
+def load_particles(paths, existing: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Read several CSVs into one table. When two files use the same group and image names
+    (e.g. both call their images 'img1'), the image name gets the file name in front so the
+    images stay separate."""
     frames = [read_particle_csv(p) for p in paths]
+    seen = {}
+    if existing is not None and len(existing):
+        for (g, im), src in existing.groupby(["group", "image"])["source_file"].first().items():
+            seen[(g, im)] = src
+    for f in frames:
+        src = f["source_file"].iloc[0] if len(f) else ""
+        keys = set(zip(f["group"], f["image"]))
+        clash = {k for k in keys if k in seen and seen[k] != src}
+        if clash:
+            stem = Path(src).stem
+            m = [(g, im) in clash for g, im in zip(f["group"], f["image"])]
+            f.loc[m, "image"] = stem + ":" + f.loc[m, "image"]
+        for k in set(zip(f["group"], f["image"])):
+            seen.setdefault(k, src)
     df = pd.concat(frames, ignore_index=True, sort=False)
     return df.reset_index(drop=True)
 
@@ -161,6 +179,10 @@ def classify_file(path: str | Path) -> str:
     first = df.iloc[:, 0].astype(str)
     numeric = sum(pd.api.types.is_numeric_dtype(df[c]) for c in df.columns)
     if "image" in cols or (first.duplicated().any() and numeric >= 3):
+        return "particles"
+    # ImageJ-style results: first column is a running 1, 2, 3 ... index
+    f0 = pd.to_numeric(df.iloc[:, 0], errors="coerce")
+    if numeric >= 3 and len(df) >= 3 and f0.notna().all() and (f0.diff().dropna() == 1).all():
         return "particles"
     if cols[0] in ("group", "그룹") or not first.duplicated().any():
         return "conditions" if len(df) <= 5000 else "particles"
