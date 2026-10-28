@@ -29,6 +29,7 @@ UI text and replies to the user are Korean; code, commits and docs in English ar
 - Bump `src/droplet_map/__init__.py` `__version__` (and pyproject) for each release; keep `docs/ko`, `docs/en` and this file current.
 - Experiment data (`*.csv`, `*.dmap`) never goes into git: the repository is public.
 - Add a selftest check for each new feature.
+- Worker QThreads need a 64 MB stack (numba); the app binary must handle `-c` (multiprocessing helpers re-launch sys.executable).
 
 ## History
 
@@ -36,3 +37,4 @@ UI text and replies to the user are Korean; code, commits and docs in English ar
 |---|---|
 | 0.1.0 | First app: data, conditions, particle map, comparison, reference score, export |
 | 0.2.0 | Three-pane layout and per-feature menus; dot unit (particle/image/group/condition); hierarchical sub-maps; shared weights applied to map and score with cohesion readout; auto-detect import, work log, recent projects, selftest |
+| 0.2.1 | Bundle fix: when multiprocessing/joblib helpers re-launch the app binary with `-c`, run the code instead of a hidden second GUI; selftest in build script has a 5 min timeout |

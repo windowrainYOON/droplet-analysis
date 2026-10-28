@@ -30,7 +30,10 @@ ditto "$APP" "/Applications/Droplet Map.app"
 xattr -dr com.apple.quarantine "/Applications/Droplet Map.app" 2>/dev/null || true
 
 # headless self-test of the installed app (synthetic data, ~1 min)
-"/Applications/Droplet Map.app/Contents/MacOS/Droplet Map" --selftest || echo "WARNING: selftest failed"
+# (killed after 5 min so a hang can never stall the build)
+perl -e 'alarm 300; exec @ARGV' "/Applications/Droplet Map.app/Contents/MacOS/Droplet Map" --selftest \
+  || echo "WARNING: selftest failed or timed out"
+pkill -f "Droplet Map.app/Contents/MacOS/Droplet Map -B" 2>/dev/null || true
 
 # DMG name: <app>-<version>-<commit>_apple silicon.dmg (Intel Macs: _intel)
 VERSION=$(python -c "import re;print(re.search(r'^__version__ = \"(.+)\"', open('src/droplet_map/__init__.py').read(), re.M).group(1))")
