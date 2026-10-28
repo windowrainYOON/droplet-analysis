@@ -230,3 +230,101 @@ def test_map_can_leave_out_measurements_and_condition_values(tmp_path):
     pr.save(tmp_path / "m.dmap")
     back = Project.load(tmp_path / "m.dmap")
     assert back.settings.map_skip_features == ["circularity"] and back.settings.map_skip_values == {"pH": [""]}
+
+
+def _two_batches(tmp_path):
+    """Batch A and batch B with the same pH conditions; batch B's particles partition 1.5x more."""
+    a = synthetic(n_groups=4)
+    b = synthetic(n_groups=4, seed=1)
+    b["group"] = "B " + b["group"]
+    b["CH1_partition"] *= 1.5
+    pa, pb = _write(a, tmp_path / "a.csv"), _write(b, tmp_path / "b.csv")
+    pr = Project.from_csv([pa], batch="A")
+    pr.add_csv([pb], batch="B")
+    pr.conditions.add_condition(ConditionDef("pH", "numeric"))
+    for g in pr.groups:
+        pr.conditions.set_value(g, "pH", g.split("pH")[1])
+    return pr
+
+
+def test_batches_membership_view_and_save(tmp_path):
+    pr = _two_batches(tmp_path)
+    assert pr.batches.names() == ["A", "B"]
+    assert {pr.batch_of(g) for g in pr.groups if g.startswith("B ")} == {"B"}
+    pr.batches.table.add_condition(ConditionDef("정제일", "categorical"))
+    pr.batches.table.set_value("B", "정제일", "2026-10-01")
+    v = pr.view
+    assert v.names()[:2] == ["배치", "배치: 정제일"] and "pH" in v.names()
+    g = next(g for g in pr.groups if g.startswith("B "))
+    assert v.value(g, "배치: 정제일") == "2026-10-01" and v.value(g, "배치") == "B"
+    pr.save(tmp_path / "b.dmap")
+    back = Project.load(tmp_path / "b.dmap")
+    assert back.batches.of == pr.batches.of and back.batches.table.value("B", "정제일") == "2026-10-01"
+
+
+def test_old_batch_condition_becomes_batch(tmp_path, project):
+    project.conditions.add_condition(ConditionDef("정제 배치", "categorical"))
+    for g in project.groups:
+        project.conditions.set_value(g, "정제 배치", "X1")
+    project.save(tmp_path / "old.dmap")
+    import zipfile
+    with zipfile.ZipFile(tmp_path / "old.dmap") as z, zipfile.ZipFile(tmp_path / "v1.dmap", "w") as out:
+        for n in z.namelist():
+            if n != "batches.json":
+                out.writestr(n, z.read(n))
+    back = Project.load(tmp_path / "v1.dmap")
+    assert back.batches.names() == ["X1"] and "정제 배치" not in back.conditions.names() and back.notes
+
+
+def test_condition_effect_is_judged_within_batches(tmp_path):
+    from droplet_map.core.analysis import association
+    pr = _two_batches(tmp_path)
+    p = prepare(pr.particles, pr.roles, pr.settings)
+    med = p.data.groupby("group")["CH1_partition"].median().to_frame()
+    view = pr.view
+    a = association(view, med, min_groups=4, strata=pr.batches.series(pr.groups))
+    assert a.level["pH"] == "group" and a.strength.at["pH", "CH1_partition"] > 0.9
+    assert a.level["배치"] == "batch" and a.hidden["배치"]          # only 2 batches
+
+
+def test_batch_comparison_and_reference_batch_score(tmp_path):
+    from droplet_map.core.analysis import group_distance
+    from droplet_map.core.batch_compare import (batch_distance, batch_feature_delta, batch_reference_score,
+                                                 batch_summary, matched_groups)
+    pr = _two_batches(tmp_path)
+    p = prepare(pr.particles, pr.roles, pr.settings)
+    m = matched_groups(pr.groups, pr.conditions, pr.batches)
+    assert list(m.columns) == ["A", "B"] and len(m) == 4
+    D, N = batch_distance(group_distance(p, pr.settings), m)
+    assert N.at["A", "B"] == 4 and D.at["A", "B"] > 0
+    delta = batch_feature_delta(p, m, "A", "B")
+    assert delta.at["평균", "CH1_partition"] > 0.2
+    sc = batch_reference_score(p, pr.settings, pr.groups, pr.conditions, pr.batches, "A")
+    summ = batch_summary(sc)
+    assert summ.at["A", "평균 score"] == pytest.approx(100) and summ.at["B", "평균 score"] < 100
+
+
+def test_delivery_summary(tmp_path):
+    from droplet_map.core.delivery import fill_delivery_from_names
+    from droplet_map.core.io import classify_file
+    rows = []
+    for t in (0, 10):
+        g = f"1uM AHP-r568, 5uM FITC-PRD, 10% PEG, {t}min"
+        for region, base in (("particle", 500), ("cyto - particle", 50)):
+            for par in ("CH1_Mean", "CH2_Mean", "area_um2", "particle_threshold"):
+                rows.append({"group": g, "region": region, "n_images": 3, "parameter": par, "n": 10,
+                             "mean": base * (1 + t / 10), "sd": 1.0, "min": 0.0, "max": 1.0})
+    f = tmp_path / "deliv.csv"
+    pd.DataFrame(rows).to_csv(f, index=False)
+    assert classify_file(f) == "delivery"
+    pr = Project.from_csv([_write(synthetic(n_groups=2), tmp_path / "a.csv")], batch="A")
+    pr.add_delivery([f], batch="A")
+    d = pr.delivery
+    assert len(d.groups()) == 2 and d.channels() == ["CH1_Mean", "CH2_Mean"]
+    assert d.ratio()["CH1_Mean"].round(3).tolist() == [0.1, 0.1]
+    assert fill_delivery_from_names(d.conditions) == ["AHP-r568", "FITC-PRD", "PEG", "시간"]
+    d.uses[d.groups()[0]] = pr.groups[0]
+    pr.save(tmp_path / "d.dmap")
+    back = Project.load(tmp_path / "d.dmap")
+    assert back.delivery.uses == d.uses and back.delivery.conditions.value(d.groups()[1], "시간") == "10"
+    assert all(back.batch_of(g) == "A" for g in back.all_groups())

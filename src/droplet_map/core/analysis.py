@@ -349,27 +349,64 @@ def reference_score(p: Prepared, s: Settings, references) -> pd.DataFrame:
 class Association:
     strength: pd.DataFrame    # condition x target, 0..1 (|rho| or epsilon^2)
     sign: pd.DataFrame        # +1 / -1 for numeric, 0 for categorical
-    n: pd.Series              # groups with that condition recorded
+    n: pd.Series              # groups (or batches, for batch-level conditions) behind each row
     kind: pd.Series
     hidden: pd.Series         # True when too few groups or no variation
     confounded: list          # (cond_a, cond_b, strength)
+    level: pd.Series = None   # "group": compared within batches · "batch": compared between batches
 
 
-def association(cond: ConditionTable, targets: pd.DataFrame, min_groups=8) -> Association:
-    """Condition x target association at group level. targets: group x column (e.g. medians, score)."""
+def _centered_ranks(v: pd.Series, strata: pd.Series) -> pd.Series:
+    """Ranks within each stratum minus that stratum's mean rank: removes batch offsets."""
+    r = v.groupby(strata).rank()
+    return r - r.groupby(strata).transform("mean")
+
+
+def association(cond: ConditionTable, targets: pd.DataFrame, min_groups=8, strata: pd.Series | None = None,
+                min_batches=3) -> Association:
+    """Condition x target association at group level. targets: group x column (e.g. medians, score).
+
+    With strata (group -> batch), a condition that varies inside batches is compared within each
+    batch (ranks centred per batch, so a batch difference cannot pose as a condition effect), and a
+    condition that is constant inside every batch is compared between batches on batch medians."""
     names = cond.names()
     S = pd.DataFrame(np.nan, index=names, columns=targets.columns)
     sign = pd.DataFrame(0.0, index=names, columns=targets.columns)
     n = pd.Series(0, index=names, dtype=int)
     hidden = pd.Series(False, index=names)
+    level = pd.Series("group", index=names, dtype=object)
     kinds = pd.Series({c.name: c.kind for c in cond.schema})
+    st = None if strata is None else strata.reindex(targets.index).fillna("—").astype(str)
+    multi = st is not None and st.nunique() > 1
     for c in cond.schema:
-        if c.kind == "numeric":
-            x = cond.numeric(c.name)
-        else:
-            x = cond.categorical(c.name)
-        x = x.reindex(targets.index)
+        x = (cond.numeric(c.name) if c.kind == "numeric" else cond.categorical(c.name)).reindex(targets.index)
         ok = x.notna()
+        between = False
+        if multi:
+            per = x[ok].groupby(st[ok]).nunique()
+            between = bool(len(per)) and (per <= 1).all()
+        if between:                    # batch-level condition: one value per batch
+            level[c.name] = "batch"
+            xb = x[ok].groupby(st[ok]).first()
+            n[c.name] = len(xb)
+            if len(xb) < min_batches or xb.nunique() < 2:
+                hidden[c.name] = True
+                continue
+            for t in targets.columns:
+                yb = targets.loc[ok, t].astype(float).groupby(st[ok]).median().reindex(xb.index)
+                good = yb.notna()
+                if good.sum() < 3:
+                    continue
+                if c.kind == "numeric":
+                    r = spearmanr(xb[good].astype(float), yb[good]).statistic
+                    if np.isfinite(r):
+                        S.at[c.name, t] = abs(r); sign.at[c.name, t] = np.sign(r)
+                else:
+                    S.at[c.name, t] = _epsilon2(yb[good], xb[good])
+            continue
+        if multi:                      # only batches where the condition actually varies
+            per = x[ok].groupby(st[ok]).transform("nunique")
+            ok = ok & (per.reindex(x.index).fillna(0) >= 2)
         n[c.name] = int(ok.sum())
         levels = x[ok].nunique()
         if n[c.name] < min_groups or levels < 2:
@@ -380,27 +417,37 @@ def association(cond: ConditionTable, targets: pd.DataFrame, min_groups=8) -> As
             good = y.notna()
             if good.sum() < 3:
                 continue
+            xs, ys = x[ok][good], y[good]
             if c.kind == "numeric":
-                r = spearmanr(x[ok][good].astype(float), y[good]).statistic
+                xs = xs.astype(float)
+                if multi:
+                    xs, ys = _centered_ranks(xs, st[xs.index]), _centered_ranks(ys, st[ys.index])
+                r = spearmanr(xs, ys).statistic
                 if np.isfinite(r):
                     S.at[c.name, t] = abs(r); sign.at[c.name, t] = np.sign(r)
             else:
-                lab = x[ok][good]
-                grp = [y[good][lab == v].to_numpy() for v in pd.unique(lab)]
-                grp = [g for g in grp if len(g) >= 1]
-                if len(grp) >= 2 and len(y[good]) > len(grp):
-                    try:
-                        H = kruskal(*grp).statistic
-                        S.at[c.name, t] = float(np.clip(H / (len(y[good]) - 1), 0, 1))
-                    except ValueError:
-                        pass
+                if multi:
+                    ys = _centered_ranks(ys, st[ys.index])
+                S.at[c.name, t] = _epsilon2(ys, xs)
     conf = []
     for i, a in enumerate(cond.schema):
         for b in cond.schema[i + 1:]:
             v = _condition_link(cond, a, b)
             if v is not None and v > 0.7:
                 conf.append((a.name, b.name, v))
-    return Association(S, sign, n, kinds, hidden, conf)
+    return Association(S, sign, n, kinds, hidden, conf, level)
+
+
+def _epsilon2(y: pd.Series, lab: pd.Series) -> float:
+    grp = [y[lab == v].to_numpy() for v in pd.unique(lab)]
+    grp = [g for g in grp if len(g) >= 1]
+    if len(grp) >= 2 and len(y) > len(grp):
+        try:
+            H = kruskal(*grp).statistic
+            return float(np.clip(H / (len(y) - 1), 0, 1))
+        except ValueError:
+            return np.nan
+    return np.nan
 
 
 def _condition_link(cond: ConditionTable, a, b):
@@ -430,7 +477,8 @@ class Result:
     assoc: Association | None
 
 
-def run_all(df, roles, cond: ConditionTable, s: Settings, progress=None, with_map=True) -> Result:
+def run_all(df, roles, cond: ConditionTable, s: Settings, progress=None, with_map=True, strata=None) -> Result:
+    """strata: group -> batch, so condition effects are judged within batches."""
     if progress:
         progress("측정값 변환 중…")
     p = prepare(df, roles, s)
@@ -453,5 +501,5 @@ def run_all(df, roles, cond: ConditionTable, s: Settings, progress=None, with_ma
         targets = targets.join(prof.image_stats[[c for c in prof.image_stats.columns if "(SD)" not in c]])
         if score is not None:
             targets["기준 score"] = score["score"].reindex(targets.index)
-        assoc = association(cond, targets, s.min_groups_assoc)
+        assoc = association(cond, targets, s.min_groups_assoc, strata)
     return Result(p, pm, prof, dist, score, assoc)

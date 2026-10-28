@@ -191,8 +191,8 @@ def size_values(df: pd.DataFrame, roles: ColumnRoles) -> np.ndarray:
 
 def classify_file(path: str | Path) -> str:
     """Guess what a file dropped on the app is, from its content rather than its name:
-    'project' (.dmap), 'template' (condition-list JSON), 'conditions' (one row per group)
-    or 'particles' (one row per particle)."""
+    'project' (.dmap), 'template' (condition-list JSON), 'conditions' (one row per group),
+    'delivery' (cell delivery summary: group, region, parameter, mean) or 'particles'."""
     path = Path(path)
     suf = path.suffix.lower()
     if suf == ".dmap":
@@ -213,6 +213,8 @@ def classify_file(path: str | Path) -> str:
     if df.empty:
         return "unknown"
     cols = [str(c).strip().lower() for c in df.columns]
+    if all(c in cols for c in ("group", "region", "parameter", "mean")):
+        return "delivery"
     first = df.iloc[:, 0].astype(str)
     numeric = sum(pd.api.types.is_numeric_dtype(df[c]) for c in df.columns)
     if "image" in cols or (first.duplicated().any() and numeric >= 3):
