@@ -1,6 +1,6 @@
 [project]
 name = "droplet-map"
-version = "0.1.0"
+version = "0.2.0"
 description = "Cluster and compare phase-separated protein droplets by morphology and experimental conditions"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -41,7 +41,7 @@ testpaths = ["tests"]
 [tool.briefcase]
 project_name = "droplet-map"
 bundle = "io.github.windowrainyoon"
-version = "0.1.0"
+version = "0.2.0"
 url = "https://github.com/windowrainYOON/droplet-analysis"
 author = "Changwoo Yoon"
 license = "LicenseRef-Proprietary"

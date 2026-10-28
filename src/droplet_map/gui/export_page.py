@@ -7,61 +7,49 @@ from pathlib import Path
 import pandas as pd
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from .common import info_label, title_label, warn
+from .common import info_label
 
 
-class ExportPage(QtWidgets.QWidget):
-    def __init__(self, parent=None, figure_sources=None):
+EXPORT_ITEMS = (("particles", "입자별 표 (QC 통과 입자 + 현재 지도 좌표 + 군집 + 신뢰도 w)"),
+                ("groups", "그룹 요약 (중앙값, 이미지 통계, n_eff, 조건)"),
+                ("score", "기준 score와 Δ"),
+                ("assoc", "조건 × 파라미터 연관 (강도, 부호, n)"),
+                ("distance", "그룹 간 거리 행렬"),
+                ("composition", "그룹별 군집 구성 비율 (현재 지도)"),
+                ("conditions", "조건 표"),
+                ("settings", "분석 설정값 (settings.json)"),
+                ("figures", "현재 그림 전부 (PNG, 200 dpi)"))
+
+
+class ExportDialog(QtWidgets.QDialog):
+    """파일 › 모든 결과 통합 저장: options first, then the folder."""
+
+    def __init__(self, parent=None, checked=None):
         super().__init__(parent)
-        self.project = None
-        self.result = None
-        self.figure_sources = figure_sources or (lambda: {})
+        self.setWindowTitle("모든 결과 통합 저장")
         lay = QtWidgets.QVBoxLayout(self)
-        lay.addWidget(title_label("내보내기"))
-        lay.addWidget(info_label("고른 항목을 한 폴더에 CSV와 PNG로 저장합니다. 엑셀이나 Prism에서 바로 열 수 있습니다 (UTF-8 BOM)."))
+        lay.addWidget(info_label("고른 항목을 새 폴더 하나에 CSV와 PNG로 저장하고, 프로젝트 파일(.dmap)도 함께 넣습니다. "
+                                 "CSV는 엑셀·Prism에서 바로 열립니다 (UTF-8 BOM)."))
         self.checks = {}
-        for key, label in (("particles", "입자별 표 (QC 통과 입자 + 지도 좌표 + 군집 + 신뢰도 w)"),
-                           ("groups", "그룹 요약 (중앙값, 이미지 통계, n_eff, 조건)"),
-                           ("score", "기준 score와 Δ"),
-                           ("assoc", "조건 × 파라미터 연관 (강도, 부호, n)"),
-                           ("distance", "그룹 간 거리 행렬"),
-                           ("composition", "그룹별 군집 구성 비율"),
-                           ("conditions", "조건 표"),
-                           ("figures", "현재 화면의 그림 전부 (PNG, 200 dpi)")):
-            cb = QtWidgets.QCheckBox(label); cb.setChecked(True)
+        for key, label in EXPORT_ITEMS:
+            cb = QtWidgets.QCheckBox(label)
+            cb.setChecked(True if checked is None else checked.get(key, True))
             self.checks[key] = cb
             lay.addWidget(cb)
-        row = QtWidgets.QHBoxLayout()
-        b = QtWidgets.QPushButton("폴더 골라서 내보내기…"); b.clicked.connect(self.export)
-        row.addWidget(b); row.addStretch(1)
-        lay.addLayout(row)
-        self.status = QtWidgets.QLabel(""); self.status.setWordWrap(True)
-        self.status.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        lay.addWidget(self.status)
-        lay.addStretch(1)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        bb.button(QtWidgets.QDialogButtonBox.Ok).setText("폴더 고르기…")
+        bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
 
-    def set_project(self, project):
-        self.project = project
-        self.result = None
-
-    def set_result(self, result):
-        self.result = result
-
-    def export(self):
-        if self.project is None:
-            warn(self, "프로젝트가 없습니다."); return
-        base = QtWidgets.QFileDialog.getExistingDirectory(self, "내보낼 폴더", str(Path.home() / "Desktop"))
-        if not base:
-            return
-        name = (self.project.path.stem if self.project.path else "droplet_map") + "_" + datetime.now().strftime("%Y%m%d-%H%M")
-        out = Path(base) / name
-        files = write_exports(out, self.project, self.result, {k: c.isChecked() for k, c in self.checks.items()},
-                              self.figure_sources() if self.checks["figures"].isChecked() else {})
-        self.status.setText(f"{len(files)}개 파일 저장: {out}")
-        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(out)))
+    def selection(self):
+        return {k: c.isChecked() for k, c in self.checks.items()}
 
 
-def write_exports(out: Path, project, result, which: dict, figures: dict) -> list[Path]:
+def export_folder_name(project) -> str:
+    return (project.path.stem if project.path else "droplet_map") + "_" + datetime.now().strftime("%Y%m%d-%H%M")
+
+
+def write_exports(out: Path, project, result, which: dict, figures: dict, particles=None) -> list[Path]:
     out.mkdir(parents=True, exist_ok=True)
     files = []
 
@@ -75,11 +63,13 @@ def write_exports(out: Path, project, result, which: dict, figures: dict) -> lis
     if result is not None:
         prep = result.prepared
         if which.get("particles"):
-            d = prep.data.copy()
-            d["shape_weight_w"] = prep.w
-            if result.pmap is not None:
-                d["umap_1"], d["umap_2"] = result.pmap.umap[:, 0], result.pmap.umap[:, 1]
-                d["cluster"] = result.pmap.clusters
+            d = particles
+            if d is None:
+                d = prep.data.copy()
+                d["shape_weight_w"] = prep.w
+                if result.pmap is not None:
+                    d["umap_1"], d["umap_2"] = result.pmap.umap[:, 0], result.pmap.umap[:, 1]
+                    d["cluster"] = result.pmap.clusters
             csv(d, "particles_with_clusters.csv", index=False)
         if which.get("groups"):
             prof = result.profiles
@@ -102,9 +92,23 @@ def write_exports(out: Path, project, result, which: dict, figures: dict) -> lis
             csv(tab, "condition_association.csv")
         if which.get("distance"):
             csv(result.distance, "group_distance.csv")
-        if which.get("composition") and result.profiles.composition is not None:
-            csv(result.profiles.composition, "cluster_composition.csv")
+        if which.get("composition"):
+            if particles is not None and "cluster" in particles.columns:
+                csv(pd.crosstab(particles["group"], particles["cluster"], normalize="index"), "cluster_composition.csv")
+            elif result.profiles.composition is not None:
+                csv(result.profiles.composition, "cluster_composition.csv")
+    if which.get("settings"):
+        import json
+        p = out / "settings.json"
+        p.write_text(json.dumps(project.settings.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"); files.append(p)
     for fname, fig in figures.items():
+        if callable(fig):            # e.g. the pyqtgraph map: a function that writes the file
+            p = out / f"{fname}.png"
+            try:
+                fig(str(p)); files.append(p)
+            except Exception:
+                pass
+            continue
         p = out / f"{fname}.png"
         try:
             fig.savefig(p, dpi=200)

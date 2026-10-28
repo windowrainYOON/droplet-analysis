@@ -131,3 +131,127 @@ def app_icon() -> QtGui.QIcon:
         return QtGui.QIcon(str(p))
     except Exception:
         return QtGui.QIcon()
+
+
+class FlowLayout(QtWidgets.QLayout):
+    """Lays widgets left to right and wraps to the next line when the pane is narrow."""
+
+    def __init__(self, parent=None, spacing=6):
+        super().__init__(parent)
+        self._items = []
+        self._spacing = spacing
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, i):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):
+        return QtCore.Qt.Orientations()
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._layout(QtCore.QRect(0, 0, width, 0), True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._layout(rect, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QtCore.QSize()
+        for it in self._items:
+            size = size.expandedTo(it.minimumSize())
+        m = self.contentsMargins()
+        return size + QtCore.QSize(m.left() + m.right(), m.top() + m.bottom())
+
+    def _layout(self, rect, test):
+        x, y, line_h = rect.x(), rect.y(), 0
+        for it in self._items:
+            hint = it.sizeHint()
+            nx = x + hint.width() + self._spacing
+            if nx - self._spacing > rect.right() and line_h > 0:
+                x, y = rect.x(), y + line_h + self._spacing
+                nx = x + hint.width() + self._spacing
+                line_h = 0
+            if not test:
+                it.setGeometry(QtCore.QRect(QtCore.QPoint(x, y), hint))
+            x = nx
+            line_h = max(line_h, hint.height())
+        return y + line_h - rect.y()
+
+
+def flow_buttons(items, parent=None) -> QtWidgets.QWidget:
+    """A wrapping row of push buttons from (text, slot) pairs."""
+    w = QtWidgets.QWidget(parent)
+    fl = FlowLayout(w)
+    for text, fn in items:
+        b = QtWidgets.QPushButton(text)
+        b.clicked.connect(fn)
+        fl.addWidget(b)
+    return w
+
+
+def section(title: str, *widgets, layout=None) -> QtWidgets.QGroupBox:
+    box = QtWidgets.QGroupBox(title)
+    lay = layout or QtWidgets.QVBoxLayout()
+    box.setLayout(lay)
+    for w in widgets:
+        if isinstance(w, QtWidgets.QLayout):
+            lay.addLayout(w)
+        else:
+            lay.addWidget(w)
+    return box
+
+
+def form(rows) -> QtWidgets.QFormLayout:
+    """Label/field rows that wrap the field under the label when the pane is narrow."""
+    f = QtWidgets.QFormLayout()
+    f.setRowWrapPolicy(QtWidgets.QFormLayout.WrapLongRows)
+    f.setFieldGrowthPolicy(QtWidgets.QFormLayout.AllNonFixedFieldsGrow)
+    for label, w in rows:
+        f.addRow(label, w)
+    return f
+
+
+def scroll_panel(*widgets) -> QtWidgets.QScrollArea:
+    """Right-pane panel: widgets stacked top to bottom, scrolls vertically, never forces width."""
+    inner = QtWidgets.QWidget()
+    lay = QtWidgets.QVBoxLayout(inner)
+    lay.setContentsMargins(4, 4, 4, 4)
+    for w in widgets:
+        lay.addWidget(w)
+    lay.addStretch(1)
+    sa = QtWidgets.QScrollArea()
+    sa.setWidget(inner)
+    sa.setWidgetResizable(True)
+    sa.setFrameShape(QtWidgets.QFrame.NoFrame)
+    sa.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+    return sa
+
+
+def save_figure_dialog(parent, fig, default_name):
+    path, _ = QtWidgets.QFileDialog.getSaveFileName(parent, "그림 저장", default_name,
+                                                    "PNG (*.png);;PDF (*.pdf);;SVG (*.svg);;TIFF (*.tif)")
+    if path:
+        fig.savefig(path, dpi=200)
+    return path
+
+
+def save_frame_dialog(parent, df, default_name, index=True):
+    path, _ = QtWidgets.QFileDialog.getSaveFileName(parent, "CSV 저장", default_name, "CSV (*.csv)")
+    if path:
+        df.to_csv(path, index=index, encoding="utf-8-sig")
+    return path

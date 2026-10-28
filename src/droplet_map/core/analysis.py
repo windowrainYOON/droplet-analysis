@@ -98,12 +98,20 @@ def prepare(df: pd.DataFrame, roles: ColumnRoles, s: Settings) -> Prepared:
     return Prepared(data, Z, w, feats, shape, n_dropped)
 
 
-def map_matrix(p: Prepared, s: Settings) -> np.ndarray:
-    """Feature matrix for the particle map: shape features pulled toward 0 for small particles."""
-    X = p.Z.to_numpy(float).copy()
+def map_matrix(p: Prepared, s: Settings, idx=None, restandardize=False) -> np.ndarray:
+    """Feature matrix for the particle map: shape features pulled toward 0 for small particles,
+    then each feature scaled by its user weight (weight 0 drops it, 2 counts it double).
+    With idx, only those particles; restandardize re-centres each feature within the subset so
+    a sub-map spreads out differences that were small on the full map."""
+    Z = p.Z if idx is None else p.Z.iloc[idx]
+    w = p.w if idx is None else p.w[idx]
+    X = Z.to_numpy(float).copy()
+    if restandardize:
+        for j in range(X.shape[1]):
+            X[:, j] = robust_z(X[:, j])
     for j, f in enumerate(p.features):
         if f in p.shape_features:
-            X[:, j] *= p.w
+            X[:, j] *= w
         X[:, j] *= float(s.feature_weights.get(f, 1.0))
     return X
 
@@ -112,16 +120,23 @@ def map_matrix(p: Prepared, s: Settings) -> np.ndarray:
 class ParticleMap:
     umap: np.ndarray
     clusters: np.ndarray
+    idx: np.ndarray | None = None     # rows of Prepared.data on this map (None = all)
+    name: str = "전체"
 
 
-def particle_map(p: Prepared, s: Settings, progress=None) -> ParticleMap:
+def particle_map(p: Prepared, s: Settings, progress=None, idx=None, name="전체") -> ParticleMap:
+    """UMAP + Leiden on all particles, or (hierarchical map) on the subset idx."""
     import umap  # heavy import (numba); keep it out of module import time
     import igraph as ig
     import leidenalg
 
-    X = map_matrix(p, s)
+    X = map_matrix(p, s, idx, restandardize=idx is not None)
+    keep = np.abs(X).sum(axis=0) > 0          # features with weight 0 contribute nothing
+    X = X[:, keep] if keep.any() else X
+    if len(X) < 10:
+        raise ValueError("하위 지도를 그리려면 입자가 10개 이상 필요합니다.")
     if progress:
-        progress("이웃 그래프와 UMAP 계산 중…")
+        progress(f"이웃 그래프와 UMAP 계산 중… ({len(X):,}개 입자)")
     reducer = umap.UMAP(n_neighbors=min(s.n_neighbors, max(2, len(X) - 1)), min_dist=0.3,
                         random_state=s.random_state, n_jobs=1)
     emb = reducer.fit_transform(X)
@@ -137,7 +152,29 @@ def particle_map(p: Prepared, s: Settings, progress=None) -> ParticleMap:
     # Number clusters by size, largest = 0.
     order = {c: i for i, c in enumerate(pd.Series(cl).value_counts().index)}
     cl = np.array([order[c] for c in cl])
-    return ParticleMap(emb, cl)
+    return ParticleMap(emb, cl, None if idx is None else np.asarray(idx), name)
+
+
+def cohesion(emb: np.ndarray, labels, k=15, max_n=5000, seed=0) -> float | None:
+    """How well the map separates the label categories: share of each particle's k nearest map
+    neighbours with the same label, rescaled so random mixing = 0 and full separation = 1.
+    Blank labels (None/NaN) are left out; None when fewer than two labels remain."""
+    from sklearn.neighbors import NearestNeighbors
+
+    lab = pd.Series(labels, dtype=object)
+    ok = lab.notna().to_numpy()
+    if ok.sum() < 30 or lab[ok].nunique() < 2:
+        return None
+    X, y = np.asarray(emb)[ok], lab[ok].astype(str).to_numpy()
+    if len(X) > max_n:
+        sel = np.random.default_rng(seed).choice(len(X), max_n, replace=False)
+        X, y = X[sel], y[sel]
+    k = min(k, len(X) - 1)
+    nb = NearestNeighbors(n_neighbors=k + 1).fit(X).kneighbors(return_distance=False)[:, 1:]
+    purity = float((y[nb] == y[:, None]).mean())
+    p = pd.Series(y).value_counts(normalize=True).to_numpy()
+    expect = float((p ** 2).sum())
+    return (purity - expect) / (1 - expect) if expect < 1 else None
 
 
 # ---------------------------------------------------------------- group level

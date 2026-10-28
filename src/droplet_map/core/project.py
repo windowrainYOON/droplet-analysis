@@ -23,6 +23,8 @@ class Project:
     conditions: ConditionTable
     settings: Settings = field(default_factory=Settings)
     path: Path | None = None
+    ui: dict = field(default_factory=dict)      # open tabs, view choices, widget values
+    log: list = field(default_factory=list)     # work log rows: [time, message]
 
     @property
     def groups(self) -> list[str]:
@@ -53,6 +55,8 @@ class Project:
             z.writestr("roles.json", json.dumps(self.roles.to_dict(), ensure_ascii=False, indent=2))
             z.writestr("conditions.json", self.conditions.to_json())
             z.writestr("settings.json", json.dumps(self.settings.to_dict(), ensure_ascii=False, indent=2))
+            z.writestr("ui.json", json.dumps(self.ui, ensure_ascii=False, indent=2))
+            z.writestr("log.json", json.dumps(self.log, ensure_ascii=False, indent=1))
             z.writestr("meta.json", json.dumps({"format": FORMAT_VERSION, "app": "Droplet Map"}))
         self.path = path
 
@@ -66,4 +70,7 @@ class Project:
             roles = ColumnRoles.from_dict(json.loads(z.read("roles.json")))
             cond = ConditionTable.from_dict(json.loads(z.read("conditions.json")), pd.unique(df["group"]))
             settings = Settings.from_dict(json.loads(z.read("settings.json")))
-        return cls(df, roles, cond, settings, path)
+            names = set(z.namelist())
+            ui = json.loads(z.read("ui.json")) if "ui.json" in names else {}
+            log = json.loads(z.read("log.json")) if "log.json" in names else []
+        return cls(df, roles, cond, settings, path, ui, log)

@@ -6,52 +6,42 @@ import pandas as pd
 from PySide6 import QtCore, QtWidgets
 
 from ..core.io import ROLES, ROLE_LABELS
-from .common import info_label, title_label
+from .common import form, info_label, scroll_panel, section, title_label
 
 
-class DataPage(QtWidgets.QWidget):
+class DataPage(QtCore.QObject):
+    """Center: per-group summary table. Right: QC threshold and column roles."""
     changed = QtCore.Signal()
-    open_requested = QtCore.Signal()
-    add_requested = QtCore.Signal()
+    title = "데이터"
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.project = None
-        lay = QtWidgets.QVBoxLayout(self)
+        # center
+        self.view = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(self.view)
         lay.addWidget(title_label("데이터"))
-        lay.addWidget(info_label("이미지 분석에서 나온 입자별 CSV를 불러옵니다. group 열이 그룹(=조건 1세트), image 열이 이미지입니다. "
-                                 "아래 표에서 어떤 측정값을 분석에 쓸지, 로그 변환과 형태값(크기 기반 신뢰도 적용) 여부를 고릅니다."))
-        bar = QtWidgets.QHBoxLayout()
-        b1 = QtWidgets.QPushButton("CSV 열기 (새 프로젝트)…"); b1.clicked.connect(self.open_requested)
-        b2 = QtWidgets.QPushButton("CSV 추가…"); b2.clicked.connect(self.add_requested)
-        bar.addWidget(b1); bar.addWidget(b2)
-        bar.addSpacing(20)
-        bar.addWidget(QtWidgets.QLabel("최소 픽셀 수(QC):"))
-        self.min_px = QtWidgets.QSpinBox(); self.min_px.setRange(0, 1000); self.min_px.setValue(3)
-        self.min_px.setToolTip("area_px가 이보다 작은 입자는 잡음으로 보고 뺍니다.")
-        self.min_px.valueChanged.connect(self._min_px_changed)
-        bar.addWidget(self.min_px)
-        bar.addStretch(1)
-        lay.addLayout(bar)
-        self.summary = QtWidgets.QLabel("CSV를 불러오세요.")
+        self.summary = QtWidgets.QLabel("파일 › 불러오기로 입자 CSV를 여세요 (창에 끌어다 놓아도 됩니다).")
+        self.summary.setWordWrap(True)
         lay.addWidget(self.summary)
-
-        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         self.groups = QtWidgets.QTableWidget()
         self.groups.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.groups.setSortingEnabled(True)
+        self.groups.setWordWrap(True)
+        lay.addWidget(self.groups, 1)
+        # right
+        self.min_px = QtWidgets.QSpinBox(); self.min_px.setRange(0, 1000); self.min_px.setValue(3)
+        self.min_px.setToolTip("area_px가 이보다 작은 입자는 잡음으로 보고 뺍니다.")
+        self.min_px.valueChanged.connect(self._min_px_changed)
+        qc = section("QC", info_label("area_px가 이 값보다 작은 입자는 잡음으로 보고 분석에서 뺍니다."),
+                     form([("최소 픽셀 수", self.min_px)]))
         self.roles = QtWidgets.QTableWidget()
         self.roles.setColumnCount(5)
-        self.roles.setHorizontalHeaderLabels(["열", "역할", "로그 변환", "형태값", "중앙값"])
-        split.addWidget(self._boxed("그룹", self.groups))
-        split.addWidget(self._boxed("열 역할", self.roles))
-        split.setSizes([500, 500])
-        lay.addWidget(split, 1)
-
-    def _boxed(self, title, w):
-        box = QtWidgets.QGroupBox(title)
-        l = QtWidgets.QVBoxLayout(box); l.addWidget(w)
-        return box
+        self.roles.setHorizontalHeaderLabels(["열", "역할", "로그", "형태값", "중앙값"])
+        self.roles.setMinimumHeight(360)
+        rb = section("열 역할", info_label("분석에 쓸 측정값을 고르고, 로그 변환과 형태값(작은 입자일수록 덜 믿음) 여부를 정합니다."),
+                     self.roles)
+        self.panel = scroll_panel(qc, rb)
 
     def _min_px_changed(self, v):
         if self.project is not None:

@@ -7,7 +7,7 @@ from PySide6 import QtCore, QtWidgets
 from scipy.cluster.hierarchy import linkage, leaves_list
 from scipy.spatial.distance import squareform
 
-from .common import MplCanvas, color, info_label, title_label, short_group, fill_table
+from .common import MplCanvas, color, fill_table, form, info_label, scroll_panel, section, short_group, title_label
 
 
 def image_level_targets(result, project) -> pd.DataFrame:
@@ -35,53 +35,70 @@ def image_level_targets(result, project) -> pd.DataFrame:
     return pd.DataFrame(rows).T
 
 
-class ComparePage(QtWidgets.QWidget):
+class ComparePage(QtCore.QObject):
+    """Center: trend / association / similarity / summary tabs. Right: what to plot."""
+    title = "조건 비교"
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.project = None
         self.result = None
         self.img_targets = None
-        lay = QtWidgets.QVBoxLayout(self)
+        self.summary_frame = None
+        self.view = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(self.view)
         lay.addWidget(title_label("조건 비교"))
-        lay.addWidget(info_label("조건에 대한 비교는 입자가 아니라 그룹(조건 1세트)과 이미지를 단위로 합니다. "
-                                 "같은 이미지의 입자 수천 개는 독립 실험이 아니기 때문입니다."))
         self.tabs = QtWidgets.QTabWidget()
         lay.addWidget(self.tabs, 1)
-
-        # trend tab
-        tw = QtWidgets.QWidget(); tl = QtWidgets.QVBoxLayout(tw)
-        bar = QtWidgets.QHBoxLayout()
-        self.x_cond = QtWidgets.QComboBox(); self.hue_cond = QtWidgets.QComboBox(); self.y_target = QtWidgets.QComboBox()
-        for lab, w in (("가로축 조건", self.x_cond), ("색 구분 조건", self.hue_cond), ("값", self.y_target)):
-            bar.addWidget(QtWidgets.QLabel(lab)); bar.addWidget(w); w.setMinimumWidth(170)
-            w.currentIndexChanged.connect(self.draw_trend)
-        self.all_targets = QtWidgets.QCheckBox("모든 값 한 번에"); self.all_targets.setChecked(True)
-        self.all_targets.toggled.connect(self.draw_trend)
-        bar.addWidget(self.all_targets); bar.addStretch(1)
-        tl.addLayout(bar)
-        tl.addWidget(info_label("점 = 이미지 1장, 선 = 그룹(이미지 중앙값). 이미지 사이 흩어짐이 크면 그 차이는 조심해서 읽습니다."))
-        self.trend = MplCanvas(self, 8, 6)
-        tl.addWidget(self.trend, 1)
-        self.tabs.addTab(tw, "조건별 추세")
-
-        self.assoc = MplCanvas(self, 8, 5)
-        aw = QtWidgets.QWidget(); al = QtWidgets.QVBoxLayout(aw)
-        al.addWidget(info_label("수치형 조건은 그룹 중앙값과의 Spearman ρ(부호 = 방향), 범주형 조건은 Kruskal-Wallis ε²(0–1)입니다. "
-                                "기록된 그룹이 너무 적거나 값이 한 가지뿐인 조건은 숨깁니다. 연관은 원인이 아니라 단서입니다."))
+        self.trend = MplCanvas(None, 8, 6)
+        self.tabs.addTab(self.trend, "조건별 추세")
+        aw = QtWidgets.QWidget(); al = QtWidgets.QVBoxLayout(aw); al.setContentsMargins(0, 0, 0, 0)
+        self.assoc = MplCanvas(None, 8, 5)
         al.addWidget(self.assoc, 1)
-        self.confound = QtWidgets.QLabel(); self.confound.setStyleSheet("color:#b05a00;")
+        self.confound = QtWidgets.QLabel(); self.confound.setStyleSheet("color:#b05a00;"); self.confound.setWordWrap(True)
         al.addWidget(self.confound)
         self.tabs.addTab(aw, "조건 × 파라미터 연관")
-
-        self.sim = MplCanvas(self, 8, 7)
+        self.sim = MplCanvas(None, 8, 7)
         self.tabs.addTab(self.sim, "그룹 유사도")
-
         self.table = QtWidgets.QTableWidget()
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.table.setSortingEnabled(True)
         self.tabs.addTab(self.table, "그룹 요약 표")
         for c in (self.trend, self.assoc, self.sim):
             c.message("'분석 실행' 후에 표시됩니다.")
+
+        self.x_cond = QtWidgets.QComboBox(); self.hue_cond = QtWidgets.QComboBox(); self.y_target = QtWidgets.QComboBox()
+        for w in (self.x_cond, self.hue_cond, self.y_target):
+            w.currentIndexChanged.connect(self.draw_trend)
+        self.all_targets = QtWidgets.QCheckBox("모든 값 한 번에 보기"); self.all_targets.setChecked(True)
+        self.all_targets.toggled.connect(self.draw_trend)
+        self.all_targets.toggled.connect(lambda on: self.y_target.setEnabled(not on))
+        self.y_target.setEnabled(False)
+        trend = section("조건별 추세",
+                        form([("가로축 조건", self.x_cond), ("색 구분 조건", self.hue_cond), ("값", self.y_target)]),
+                        self.all_targets,
+                        info_label("점 = 이미지 1장, 선 = 그룹(이미지 중앙값). 이미지 사이 흩어짐이 크면 그 차이는 조심해서 읽습니다."))
+        about = section("읽는 법",
+                        info_label("비교는 입자가 아니라 그룹(조건 1세트)과 이미지를 단위로 합니다. 같은 이미지의 입자 수천 개는 "
+                                   "독립 실험이 아니기 때문입니다."),
+                        info_label("연관: 수치형 조건은 그룹 중앙값과의 Spearman ρ(부호 = 방향), 범주형 조건은 Kruskal-Wallis ε²(0–1). "
+                                   "기록된 그룹이 너무 적거나 값이 한 가지뿐인 조건은 숨깁니다. 연관은 원인이 아니라 단서입니다."))
+        self.panel = scroll_panel(trend, about)
+        self.tabs.currentChanged.connect(lambda i: trend.setVisible(i == 0))
+
+    def ui_state(self):
+        return {"x": self.x_cond.currentText(), "hue": self.hue_cond.currentText(), "y": self.y_target.currentText(),
+                "all": self.all_targets.isChecked(), "tab": self.tabs.currentIndex()}
+
+    def restore_ui(self, st):
+        if not st:
+            return
+        for w, k in ((self.x_cond, "x"), (self.hue_cond, "hue"), (self.y_target, "y")):
+            i = w.findText(st.get(k, ""))
+            if i >= 0:
+                w.setCurrentIndex(i)
+        self.all_targets.setChecked(bool(st.get("all", True)))
+        self.tabs.setCurrentIndex(int(st.get("tab", 0)))
 
     def set_project(self, project):
         self.project = project

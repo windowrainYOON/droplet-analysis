@@ -28,7 +28,16 @@ if [ -d "/Applications/Droplet Map.app" ]; then
 fi
 ditto "$APP" "/Applications/Droplet Map.app"
 xattr -dr com.apple.quarantine "/Applications/Droplet Map.app" 2>/dev/null || true
-cp -f "$DMG" "$HOME/Desktop/"
+
+# headless self-test of the installed app (synthetic data, ~1 min)
+"/Applications/Droplet Map.app/Contents/MacOS/Droplet Map" --selftest || echo "WARNING: selftest failed"
+
+# DMG name: <app>-<version>-<commit>_apple silicon.dmg (Intel Macs: _intel)
+VERSION=$(python -c "import re;print(re.search(r'^__version__ = \"(.+)\"', open('src/droplet_map/__init__.py').read(), re.M).group(1))")
+COMMIT=$(git rev-parse --short HEAD)
+ARCH=$( [ "$(uname -m)" = "arm64" ] && echo "apple silicon" || echo "intel" )
+OUT="$HOME/Desktop/Droplet Map-${VERSION}-${COMMIT}_${ARCH}.dmg"
+cp -f "$DMG" "$OUT"
 
 echo "Installed: /Applications/Droplet Map.app"
-echo "DMG:       $HOME/Desktop/$(basename "$DMG")"
+echo "DMG:       $OUT"

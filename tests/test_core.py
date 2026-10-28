@@ -81,3 +81,30 @@ def test_fill_from_group_names():
     t.set_value("FITC-PRD, pH6, 0mM NaCl, 10% PEG", "pH", "6.2")
     assert fill_from_group_names(t, "other") == []
     assert t.value("FITC-PRD, pH6, 0mM NaCl, 10% PEG", "pH") == "6.2" and t.value("control", "Batch") == "B260430-1hsU-200-4"
+
+
+def test_feature_weight_changes_map_input_and_cohesion(project):
+    from droplet_map.core.analysis import cohesion, map_matrix, prepare
+    s = Settings()
+    p = prepare(project.particles, project.roles, s)
+    j = p.features.index("CH1_partition")
+    base = map_matrix(p, s)
+    s.feature_weights["CH1_partition"] = 3.0
+    assert np.allclose(map_matrix(p, s)[:, j], 3 * base[:, j])
+    s.feature_weights["CH1_partition"] = 0.0
+    assert np.allclose(map_matrix(p, s)[:, j], 0)
+    rng = np.random.default_rng(0)
+    lab = np.repeat(["a", "b"], 200)
+    tight = np.c_[np.where(lab == "a", 0, 5) + rng.normal(0, .3, 400), rng.normal(0, .3, 400)]
+    loose = np.c_[np.where(lab == "a", 0, 1) + rng.normal(0, 1, 400), rng.normal(0, 1, 400)]
+    assert cohesion(tight, lab) > 0.8 > cohesion(loose, lab)
+    assert cohesion(tight, np.where(lab == "a", "a", None)) is None
+
+
+def test_sub_map(project):
+    from droplet_map.core.analysis import particle_map, prepare
+    s = Settings(n_neighbors=10)
+    p = prepare(project.particles, project.roles, s)
+    idx = np.flatnonzero(p.data["group"].str.endswith("pH5").to_numpy())
+    pm = particle_map(p, s, idx=idx, name="pH5")
+    assert pm.umap.shape == (len(idx), 2) and len(pm.clusters) == len(idx) and pm.name == "pH5"

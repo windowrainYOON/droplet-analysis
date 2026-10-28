@@ -12,6 +12,10 @@ def main():
     cache.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("NUMBA_CACHE_DIR", str(cache))
 
+    if "--selftest" in sys.argv:
+        from .selftest import run
+        sys.exit(run())
+
     from PySide6 import QtWidgets
     from .gui.common import app_icon
     from .gui.main_window import MainWindow

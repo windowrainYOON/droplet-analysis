@@ -19,6 +19,9 @@ One row per particle. `group` (one set of conditions) and `image` columns, plus 
 such as `eq_diameter_um`, `circularity`, `solidity`, `aspect_ratio`, `nnd_um`, `CH1_partition`.
 Column roles are guessed and can be changed on the 데이터 page.
 
+Layout: group list (left) · results (center) · settings and measurement weights (right). One menu per
+feature holds that feature's tab toggle, saves and loads. See `docs/ko/사용법.md` / `docs/en/usage.md`.
+
 ## Run from source
 
 ```bash
@@ -26,6 +29,7 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 python -m droplet_map
 pytest
+python -m droplet_map --selftest     # headless end-to-end check on synthetic data
 ```
 
 ## Build the app

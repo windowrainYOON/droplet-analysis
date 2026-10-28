@@ -132,3 +132,36 @@ def size_values(df: pd.DataFrame, roles: ColumnRoles) -> np.ndarray:
     if "area_um2" in df.columns:
         return 2 * np.sqrt(df["area_um2"].to_numpy(float) / np.pi)
     raise ValueError("입자 크기(지름 또는 면적) 열을 찾을 수 없습니다.")
+
+
+def classify_file(path: str | Path) -> str:
+    """Guess what a file dropped on the app is, from its content rather than its name:
+    'project' (.dmap), 'template' (condition-list JSON), 'conditions' (one row per group)
+    or 'particles' (one row per particle)."""
+    path = Path(path)
+    suf = path.suffix.lower()
+    if suf == ".dmap":
+        return "project"
+    if suf == ".json":
+        import json
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return "unknown"
+        return "template" if isinstance(data, dict) and "schema" in data else "unknown"
+    if suf not in (".csv", ".txt", ".tsv"):
+        return "unknown"
+    try:
+        df = pd.read_csv(path, encoding="utf-8-sig", nrows=20000, sep=None, engine="python")
+    except Exception:
+        return "unknown"
+    if df.empty:
+        return "unknown"
+    cols = [str(c).strip().lower() for c in df.columns]
+    first = df.iloc[:, 0].astype(str)
+    numeric = sum(pd.api.types.is_numeric_dtype(df[c]) for c in df.columns)
+    if "image" in cols or (first.duplicated().any() and numeric >= 3):
+        return "particles"
+    if cols[0] in ("group", "그룹") or not first.duplicated().any():
+        return "conditions" if len(df) <= 5000 else "particles"
+    return "particles" if numeric >= 3 else "unknown"
