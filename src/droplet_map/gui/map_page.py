@@ -20,6 +20,7 @@ UNITS = (("입자", "particle"), ("이미지 (입자 중앙 위치)", "image"), 
 class MapPage(QtCore.QObject):
     run_requested = QtCore.Signal()                 # recompute the current map level
     submap_requested = QtCore.Signal(object, str)   # particle row indices, name
+    inputs_changed = QtCore.Signal()                # measurements / groups going into the map
     weights_note = "가중치는 오른쪽 '측정값 가중치' 탭에서 바꿉니다."
     title = "입자 지도"
 
@@ -32,6 +33,7 @@ class MapPage(QtCore.QObject):
         self.sel_mask = None
         self.roi = None
         self.stale = False
+        self._skip_values = {}      # condition -> set of values left out of the map ("" = not recorded)
         self._build_view()
         self._build_panel()
 
@@ -112,6 +114,30 @@ class MapPage(QtCore.QObject):
                        self.labels,
                        self.cohesion)
 
+        self.map_feats = QtWidgets.QListWidget()
+        self.map_feats.setMinimumHeight(110); self.map_feats.setMaximumHeight(170)
+        self.map_feats.itemChanged.connect(self._inputs_edited)
+        self.skip_cond = QtWidgets.QComboBox()
+        self.skip_cond.currentIndexChanged.connect(self._fill_skip_values)
+        self.skip_vals = QtWidgets.QListWidget()
+        self.skip_vals.setMinimumHeight(90); self.skip_vals.setMaximumHeight(150)
+        self.skip_vals.itemChanged.connect(self._skip_value_edited)
+        self.only_visible = QtWidgets.QCheckBox("왼쪽에서 체크한 그룹만으로 지도 계산")
+        self.only_visible.setToolTip("끄면 왼쪽 체크는 표시만 바꾸고, 지도는 모든 그룹으로 계산합니다.")
+        self.only_visible.toggled.connect(self._inputs_edited)
+        self.inputs_summary = QtWidgets.QLabel(""); self.inputs_summary.setWordWrap(True)
+        self.inputs_summary.setStyleSheet("color:#555;")
+        inputs = section("지도에 넣을 값",
+                         info_label("체크를 끈 측정값은 지도 좌표와 군집 계산에서 빠집니다. 체크를 끈 조건 값의 그룹은 "
+                                    "지도 계산에서 빠집니다. 기준 score와 그룹 비교에는 영향이 없습니다. "
+                                    "QC까지 포함해 분석 전체에서 빼려면 데이터 탭의 '열 역할'을 바꾸세요."),
+                         QtWidgets.QLabel("측정값"), self.map_feats,
+                         form([("조건", self.skip_cond)]), self.skip_vals,
+                         self.only_visible,
+                         flow_buttons((("모두 넣기", self._include_all),
+                                       ("지도 다시 계산", self.run_requested.emit))),
+                         self.inputs_summary)
+
         self.cluster_list = QtWidgets.QListWidget()
         self.cluster_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.cluster_list.setMinimumHeight(140)
@@ -127,7 +153,7 @@ class MapPage(QtCore.QObject):
                                      ("선택 영역 → 하위 지도", self._submap_roi),
                                      ("상위 지도로", self.go_up))),
                        sel_row)
-        self.panel = scroll_panel(calc, dots, hier)
+        self.panel = scroll_panel(calc, inputs, dots, hier)
 
     def _dspin(self, lo, hi, val, step, suffix, tip):
         s = QtWidgets.QDoubleSpinBox(); s.setRange(lo, hi); s.setValue(val); s.setSingleStep(step)
@@ -142,17 +168,113 @@ class MapPage(QtCore.QObject):
         self.result = None
         self.levels = []
         self.plot.clear(); self.legend.clear()
+        self._skip_values = {k: set(map(str, v)) for k, v in s.map_skip_values.items()}
+        self.only_visible.blockSignals(True); self.only_visible.setChecked(bool(s.map_skip_groups)); self.only_visible.blockSignals(False)
         self._fill_options()
+        self.fill_inputs()
         self._draw_crumbs()
 
     def apply_settings(self):
         s = self.project.settings
         s.d50, s.k, s.n_neighbors, s.resolution = self.d50.value(), self.kk.value(), self.nn.value(), self.res.value()
+        s.map_skip_features = [self.map_feats.item(i).data(QtCore.Qt.UserRole) for i in range(self.map_feats.count())
+                               if self.map_feats.item(i).checkState() != QtCore.Qt.Checked]
+        s.map_skip_values = {k: sorted(v) for k, v in self._skip_values.items() if v}
+        if self.only_visible.isChecked() and self.visible is not None:
+            s.map_skip_groups = [g for g in self.project.groups if g not in self.visible]
+        else:
+            s.map_skip_groups = []
+
+    # ---- what goes into the map -------------------------------------------
+    def fill_inputs(self):
+        """Measurement and condition-value check lists, from the project settings."""
+        if self.project is None:
+            return
+        skip = set(self.project.settings.map_skip_features)
+        self.map_feats.blockSignals(True); self.map_feats.clear()
+        for f in self.project.roles.features():
+            it = QtWidgets.QListWidgetItem(f)
+            it.setData(QtCore.Qt.UserRole, f)
+            it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
+            it.setCheckState(QtCore.Qt.Unchecked if f in skip else QtCore.Qt.Checked)
+            self.map_feats.addItem(it)
+        self.map_feats.blockSignals(False)
+        cur = self.skip_cond.currentText()
+        self.skip_cond.blockSignals(True); self.skip_cond.clear()
+        for c in self.project.conditions.schema:
+            self.skip_cond.addItem(c.name)
+        i = self.skip_cond.findText(cur); self.skip_cond.setCurrentIndex(max(i, 0))
+        self.skip_cond.blockSignals(False)
+        self._fill_skip_values()
+
+    def _fill_skip_values(self):
+        self.skip_vals.blockSignals(True); self.skip_vals.clear()
+        name = self.skip_cond.currentText()
+        if self.project is not None and name:
+            vals = self.project.conditions.categorical(name)
+            skip = self._skip_values.get(name, set())
+            levels = [str(v) for v in sorted(vals.dropna().unique(), key=_level_key)]
+            if vals.isna().any():
+                levels.append("")
+            for v in levels:
+                n = int((vals.isna() if v == "" else vals.astype(str).eq(v)).sum())
+                it = QtWidgets.QListWidgetItem(f"{v or '기록 안 함'}  (그룹 {n}개)")
+                it.setData(QtCore.Qt.UserRole, v)
+                it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
+                it.setCheckState(QtCore.Qt.Unchecked if v in skip else QtCore.Qt.Checked)
+                self.skip_vals.addItem(it)
+        self.skip_vals.blockSignals(False)
+        self._update_inputs_summary()
+
+    def _skip_value_edited(self, _it=None):
+        name = self.skip_cond.currentText()
+        if not name:
+            return
+        self._skip_values[name] = {self.skip_vals.item(i).data(QtCore.Qt.UserRole) for i in range(self.skip_vals.count())
+                                   if self.skip_vals.item(i).checkState() != QtCore.Qt.Checked}
+        self._inputs_edited()
+
+    def _inputs_edited(self, *_a):
+        if self.project is None:
+            return
+        self.apply_settings()
+        self._update_inputs_summary()
+        if self.result is not None:
+            self.set_stale("지도에 넣을 값이 바뀌었습니다. '지도 다시 계산'을 누르면 반영됩니다.")
+        self.inputs_changed.emit()
+
+    def _include_all(self):
+        self._skip_values = {}
+        self.only_visible.blockSignals(True); self.only_visible.setChecked(False); self.only_visible.blockSignals(False)
+        self.map_feats.blockSignals(True)
+        for i in range(self.map_feats.count()):
+            self.map_feats.item(i).setCheckState(QtCore.Qt.Checked)
+        self.map_feats.blockSignals(False)
+        self._fill_skip_values()
+        self._inputs_edited()
+
+    def visible_changed_for_map(self):
+        """Left-pane checks changed: matters for the map calculation only when 'only checked groups' is on."""
+        if self.only_visible.isChecked():
+            self._inputs_edited()
+
+    def _update_inputs_summary(self):
+        if self.project is None:
+            return
+        from ..core.analysis import map_skipped_groups
+        s = self.project.settings
+        feats = self.project.roles.features()
+        n_f = len([f for f in feats if f not in s.map_skip_features])
+        skipped = map_skipped_groups(self.project.conditions, s)
+        groups = self.project.groups
+        n_g = len([g for g in groups if g not in skipped])
+        self.inputs_summary.setText(f"지도 계산에 쓰는 값: 측정값 {n_f}/{len(feats)}개 · 그룹 {n_g}/{len(groups)}개")
 
     def ui_state(self) -> dict:
         return {"unit": self.unit.currentData(), "unit_cond": self.unit_cond.currentText(),
                 "color_by": self.color_by.currentText(), "shape_by": self.shape_by.currentText(), "dot": self.dot.value(),
                 "labels": self.labels.isChecked(), "auto_rerun": self.auto_rerun.isChecked(),
+                "skip_cond": self.skip_cond.currentText(),
                 "bottom_tab": self.bottom.currentIndex()}
 
     def restore_ui(self, st: dict):
@@ -171,6 +293,9 @@ class MapPage(QtCore.QObject):
         self.labels.setChecked(bool(st.get("labels", True)))
         self.auto_rerun.setChecked(bool(st.get("auto_rerun", False)))
         self.bottom.setCurrentIndex(int(st.get("bottom_tab", 0)))
+        i = self.skip_cond.findText(st.get("skip_cond", ""))
+        if i >= 0:
+            self.skip_cond.setCurrentIndex(i)
 
     def _fill_options(self):
         cur = self.color_by.currentText()
@@ -207,6 +332,7 @@ class MapPage(QtCore.QObject):
 
     def conditions_changed(self):
         self._fill_options()
+        self.fill_inputs()
         self.redraw()
 
     def set_visible_groups(self, groups):

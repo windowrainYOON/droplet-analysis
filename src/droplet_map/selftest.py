@@ -33,7 +33,7 @@ def synthetic(n_groups=8, per_image=120, seed=0) -> pd.DataFrame:
 
 def run() -> int:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PySide6 import QtWidgets
+    from PySide6 import QtCore, QtWidgets
     from .gui.main_window import MainWindow
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -107,6 +107,24 @@ def run() -> int:
     mp.auto_rerun.setChecked(False)
     w.rerun_map(); ok = wait(w)
     check("가중치 → 지도 다시 계산", ok and w.result.pmap is not None)
+
+    # leave a measurement and a condition value out of the map only
+    n_score = len(w.result.score)
+    for i in range(mp.map_feats.count()):
+        if mp.map_feats.item(i).data(QtCore.Qt.UserRole) == "circularity":
+            mp.map_feats.item(i).setCheckState(QtCore.Qt.Unchecked)
+    mp.skip_cond.setCurrentText("pH"); app.processEvents()
+    for i in range(mp.skip_vals.count()):
+        if mp.skip_vals.item(i).data(QtCore.Qt.UserRole) == "5":
+            mp.skip_vals.item(i).setCheckState(QtCore.Qt.Unchecked)
+    w.rerun_map(); ok = wait(w)
+    pm = w.result.pmap
+    on_map = set(w.result.prepared.data["group"].iloc[pm.idx]) if pm is not None and pm.idx is not None else set()
+    ph5 = {g for g in w.project.groups if "pH5" in g}
+    check("지도에서 측정값·조건 값 빼기", ok and on_map and not on_map & ph5 and len(w.result.score) == n_score
+          and w.project.settings.map_skip_features == ["circularity"], f"지도 그룹 {len(on_map)}개")
+    mp._include_all(); w.rerun_map(); ok = wait(w)
+    check("모두 넣기", ok and w.result.pmap.idx is None)
 
     out = tmp / "export"
     files = w.export_to(out, {k: True for k in ("particles", "groups", "score", "assoc", "distance",

@@ -11,7 +11,7 @@ import pandas as pd
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from .. import __version__
-from ..core.analysis import particle_map, reference_score, run_all
+from ..core.analysis import map_rows, particle_map, reference_score, run_all
 from ..core.io import classify_file
 from ..core.project import Project
 from .common import app_icon, save_figure_dialog, save_frame_dialog, set_group_names, warn
@@ -98,10 +98,11 @@ class MainWindow(QtWidgets.QMainWindow):
         # signals between panes
         self.data_page.changed.connect(self._data_changed)
         self.cond_page.changed.connect(self._conditions_changed)
-        self.groups_panel.visible_changed.connect(lambda: self.map_page.set_visible_groups(self.groups_panel.visible_groups()))
+        self.groups_panel.visible_changed.connect(self._visible_changed)
         self.groups_panel.references_changed.connect(self._references_changed)
         self.map_page.run_requested.connect(self.rerun_map)
         self.map_page.submap_requested.connect(self.run_submap)
+        self.map_page.inputs_changed.connect(self._map_inputs_changed)
         self.score_page.recompute_requested.connect(self.recompute_score)
         self.weights.changed.connect(self._weights_changed)
 
@@ -258,9 +259,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dirty = True
         self._update_title()
 
+    def _visible_changed(self):
+        self.map_page.set_visible_groups(self.groups_panel.visible_groups())
+        self.map_page.visible_changed_for_map()
+
+    def _map_inputs_changed(self):
+        self._mark_dirty()
+        self.statusBar().showMessage(self._map_inputs_text())
+
+    def _map_inputs_text(self):
+        s = self.project.settings
+        vals = "; ".join(f"{k}={'/'.join(v or '기록 안 함' for v in vs)}" for k, vs in s.map_skip_values.items())
+        return ("지도에서 뺀 값 — 측정값: " + (", ".join(s.map_skip_features) or "없음")
+                + " · 조건 값: " + (vals or "없음")
+                + (f" · 체크 안 한 그룹 {len(s.map_skip_groups)}개" if s.map_skip_groups else ""))
+
     def _data_changed(self):
         self._mark_dirty()
         self.weights.rebuild()
+        self.map_page.fill_inputs()
         if self.result is not None:
             self.map_page.set_stale("측정값·QC 설정이 바뀌었습니다. '분석 실행'으로 다시 계산하세요.")
 
@@ -560,6 +577,8 @@ class MainWindow(QtWidgets.QMainWindow):
         p = self.project
         s = p.settings
         used = (s.d50, s.k, s.min_px, tuple(p.roles.features()))
+        if s.map_skip_features or s.map_skip_values or s.map_skip_groups:
+            self.log(self._map_inputs_text())
         self._start("분석", lambda prog: run_all(p.particles, p.roles, p.conditions, s, progress=prog),
                     lambda r, dt: self._analysis_done(r, dt, used))
 
@@ -594,8 +613,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return self.run_analysis()
         pm = self.map_page.current()
         prep, s = self.result.prepared, self.project.settings
+        idx = map_rows(prep, self.project.conditions, s, pm.idx)
         self._start("하위 지도 다시 계산",
-                    lambda prog: particle_map(prep, s, prog, idx=pm.idx, name=pm.name),
+                    lambda prog: particle_map(prep, s, prog, idx=idx, name=pm.name),
                     lambda r, dt: (self.map_page.replace_level(r), self.log(f"지도 다시 계산: {pm.name} ({dt:.1f}초)")))
 
     def run_submap(self, idx, name):
@@ -603,6 +623,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._collect_settings()
         prep, s = self.result.prepared, self.project.settings
+        idx = map_rows(prep, self.project.conditions, s, idx)
         self._start("하위 지도",
                     lambda prog: particle_map(prep, s, prog, idx=idx, name=name),
                     lambda r, dt: (self.map_page.push_level(r),

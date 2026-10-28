@@ -25,6 +25,10 @@ class Settings:
     min_groups_assoc: int = 8
     random_state: int = 0
     feature_weights: dict = field(default_factory=dict)
+    # particle map only (the score and comparison still use everything):
+    map_skip_features: list = field(default_factory=list)   # measurements left out of the map
+    map_skip_values: dict = field(default_factory=dict)     # condition -> values whose groups are left out ("" = not recorded)
+    map_skip_groups: list = field(default_factory=list)     # groups left out by name
 
     def to_dict(self):
         return asdict(self)
@@ -112,8 +116,31 @@ def map_matrix(p: Prepared, s: Settings, idx=None, restandardize=False) -> np.nd
     for j, f in enumerate(p.features):
         if f in p.shape_features:
             X[:, j] *= w
-        X[:, j] *= float(s.feature_weights.get(f, 1.0))
+        X[:, j] *= 0.0 if f in s.map_skip_features else float(s.feature_weights.get(f, 1.0))
     return X
+
+
+def map_skipped_groups(cond: ConditionTable | None, s: Settings) -> set:
+    """Groups the user chose to leave out of the particle map (by name or by condition value)."""
+    out = set(s.map_skip_groups)
+    if cond is not None:
+        for name, values in s.map_skip_values.items():
+            if name not in cond.values.columns or not values:
+                continue
+            v = cond.categorical(name)
+            skip = set(map(str, values))
+            out |= {g for g, x in v.items() if ("" if pd.isna(x) else str(x)) in skip}
+    return out
+
+
+def map_rows(p: Prepared, cond: ConditionTable | None, s: Settings, idx=None):
+    """Rows of p.data that go into the map: idx (or all) minus the skipped groups. None = all rows."""
+    skip = map_skipped_groups(cond, s)
+    if not skip:
+        return idx
+    keep = ~p.data["group"].isin(skip).to_numpy()
+    rows = np.flatnonzero(keep) if idx is None else np.asarray(idx)[keep[np.asarray(idx)]]
+    return rows
 
 
 @dataclass
@@ -124,17 +151,20 @@ class ParticleMap:
     name: str = "전체"
 
 
-def particle_map(p: Prepared, s: Settings, progress=None, idx=None, name="전체") -> ParticleMap:
-    """UMAP + Leiden on all particles, or (hierarchical map) on the subset idx."""
+def particle_map(p: Prepared, s: Settings, progress=None, idx=None, name="전체", restandardize=None) -> ParticleMap:
+    """UMAP + Leiden on all particles, or (hierarchical map) on the subset idx.
+    Sub-maps re-centre the measurements within the subset unless restandardize=False."""
     import umap  # heavy import (numba); keep it out of module import time
     import igraph as ig
     import leidenalg
 
-    X = map_matrix(p, s, idx, restandardize=idx is not None)
+    X = map_matrix(p, s, idx, restandardize=(idx is not None) if restandardize is None else restandardize)
     keep = np.abs(X).sum(axis=0) > 0          # features with weight 0 contribute nothing
-    X = X[:, keep] if keep.any() else X
+    if not keep.any():
+        raise ValueError("지도에 넣을 측정값이 없습니다. '지도에 넣을 값'에서 측정값을 하나 이상 켜세요.")
+    X = X[:, keep]
     if len(X) < 10:
-        raise ValueError("하위 지도를 그리려면 입자가 10개 이상 필요합니다.")
+        raise ValueError("지도를 그리려면 입자가 10개 이상 필요합니다. 지도에서 뺀 그룹이 너무 많은지 확인하세요.")
     if progress:
         progress(f"이웃 그래프와 UMAP 계산 중… ({len(X):,}개 입자)")
     reducer = umap.UMAP(n_neighbors=min(s.n_neighbors, max(2, len(X) - 1)), min_dist=0.3,
@@ -224,7 +254,8 @@ def group_profiles(p: Prepared, pmap: ParticleMap | None = None) -> GroupProfile
         img_stats["이미지당 총 입자 면적 µm² (평균)"] = img.groupby(level=0)["total_area"].mean()
     comp = None
     if pmap is not None:
-        comp = pd.crosstab(d["group"], pmap.clusters, normalize="index").reindex(groups)
+        g_on_map = d["group"] if pmap.idx is None else d["group"].iloc[pmap.idx]
+        comp = pd.crosstab(g_on_map.to_numpy(), pmap.clusters, normalize="index").reindex(groups)
     return GroupProfiles(groups, pd.DataFrame(mz).T.reindex(groups), pd.DataFrame(mr).T.reindex(groups),
                          gb.size().reindex(groups), gb["image"].nunique().reindex(groups),
                          n_eff.reindex(groups), gb["shape_weight"].mean().reindex(groups),
@@ -403,7 +434,11 @@ def run_all(df, roles, cond: ConditionTable, s: Settings, progress=None, with_ma
     if progress:
         progress("측정값 변환 중…")
     p = prepare(df, roles, s)
-    pm = particle_map(p, s, progress) if with_map else None
+    pm = None
+    if with_map:
+        rows = map_rows(p, cond, s)
+        pm = particle_map(p, s, progress, idx=rows, name="전체" if rows is None else "전체 (일부 그룹 제외)",
+                          restandardize=False)
     if progress:
         progress("그룹 프로필과 유사도 계산 중…")
     prof = group_profiles(p, pm)

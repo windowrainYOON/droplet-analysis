@@ -207,3 +207,26 @@ def test_classify_imagej_results(tmp_path):
     assert classify_file(_write(df, tmp_path / "Results.csv")) == "particles"
     cond = pd.DataFrame({"group": ["a", "b"], "pH": [5, 6]})
     assert classify_file(_write(cond, tmp_path / "cond.csv")) == "conditions"
+
+
+def test_map_can_leave_out_measurements_and_condition_values(tmp_path):
+    from droplet_map.core.analysis import map_matrix, map_rows, particle_map
+    df = synthetic(n_groups=4)
+    pr = Project.from_csv([_write(df, tmp_path / "a.csv")])
+    pr.conditions.add_condition(ConditionDef("pH", "numeric"))
+    for g in pr.groups:
+        if "pH5" in g:
+            pr.conditions.set_value(g, "pH", "5")
+    s = pr.settings
+    s.map_skip_features = ["circularity"]
+    s.map_skip_values = {"pH": [""]}            # groups without a recorded pH
+    p = prepare(pr.particles, pr.roles, s)
+    rows = map_rows(p, pr.conditions, s)
+    assert set(p.data["group"].iloc[rows]) == {g for g in pr.groups if "pH5" in g}
+    X = map_matrix(p, s)
+    assert np.all(X[:, p.features.index("circularity")] == 0)
+    pm = particle_map(p, s, idx=rows, restandardize=False)
+    assert len(pm.clusters) == len(rows)
+    pr.save(tmp_path / "m.dmap")
+    back = Project.load(tmp_path / "m.dmap")
+    assert back.settings.map_skip_features == ["circularity"] and back.settings.map_skip_values == {"pH": [""]}

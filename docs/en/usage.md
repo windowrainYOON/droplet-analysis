@@ -14,6 +14,9 @@
 - **Cohesion**: how well the map separates the colour categories, 0 (mixed) to 1 (fully separated).
 - **Hierarchical maps**: select clusters → "선택 군집 → 하위 지도", or a region → "선택 영역 → 하위 지도". Sub-maps re-standardise within the subset. Click the path at the top to go back.
 
+## What goes into the map
+In the particle-map settings, '지도에 넣을 값' lets you untick measurements (left out of the map coordinates and clusters) and condition values (their groups are left out of the map, e.g. drop pH 8). '왼쪽에서 체크한 그룹만으로 지도 계산' computes the map from the groups ticked in the left list. The reference score and comparisons still use everything. Press '지도 다시 계산' to apply; the choices are saved in the project.
+
 ## Measurement weights
 0 = drop, 1 = default, 2 = double. The reference score updates immediately; the map updates with "지도 다시 계산" (or the auto re-run option).
 

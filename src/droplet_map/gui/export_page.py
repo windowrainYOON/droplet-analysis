@@ -67,9 +67,11 @@ def write_exports(out: Path, project, result, which: dict, figures: dict, partic
             if d is None:
                 d = prep.data.copy()
                 d["shape_weight_w"] = prep.w
-                if result.pmap is not None:
-                    d["umap_1"], d["umap_2"] = result.pmap.umap[:, 0], result.pmap.umap[:, 1]
-                    d["cluster"] = result.pmap.clusters
+                pm = result.pmap
+                if pm is not None:
+                    rows = d.index if pm.idx is None else d.index[pm.idx]
+                    d.loc[rows, "umap_1"], d.loc[rows, "umap_2"] = pm.umap[:, 0], pm.umap[:, 1]
+                    d.loc[rows, "cluster"] = pm.clusters
             csv(d, "particles_with_clusters.csv", index=False)
         if which.get("groups"):
             prof = result.profiles
