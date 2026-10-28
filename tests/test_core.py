@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from droplet_map.core.analysis import Settings, reliability_weight, run_all
+from droplet_map.core.analysis import Settings, prepare, reliability_weight, run_all
 from droplet_map.core.conditions import ConditionDef, ConditionTable
 from droplet_map.core.project import Project
 
@@ -154,6 +154,27 @@ def test_odd_format_file_does_not_switch_off_measurements(tmp_path):
     pr = Project.from_csv([a, b])
     assert "circularity" in pr.roles.features() and len(pr.notes) == 1 and "ij.csv" in pr.notes[0]
 
+
+
+def test_add_missing_column_file_and_odd_file_together(tmp_path):
+    df = synthetic(n_groups=4)
+    a = _write(df, tmp_path / "a.csv")
+    no_part = df.drop(columns=[c for c in df.columns if "partition" in c]).copy()
+    no_part["group"] = "B_" + no_part["group"]
+    no_part["circularity"] = no_part["circularity"] * 0.9
+    b = _write(no_part, tmp_path / "b.csv")
+    ij = pd.DataFrame({"group": "IJ", "image": "x", "Area": np.random.rand(60), "Circ.": np.random.rand(60),
+                       "Solidity": np.random.rand(60), "AR": 1 + np.random.rand(60)})
+    c = _write(ij, tmp_path / "ij.csv")
+    pr = Project.from_csv([a])
+    notes = pr.add_csv([b, c])
+    feats = pr.roles.features()
+    assert not any("partition" in f for f in feats) and "circularity" in feats
+    assert not {"Area", "Circ."} & set(feats)
+    text = "\n".join(notes)
+    assert "b.csv" in text and "ij.csv: 표준 측정값" in text
+    prep = prepare(pr.particles, pr.roles, pr.settings)
+    assert (prep.data["source_file"] == "b.csv").any() and not (prep.data["source_file"] == "ij.csv").any()
 
 def test_numeric_looking_names_survive_save(tmp_path):
     df = synthetic(n_groups=2)

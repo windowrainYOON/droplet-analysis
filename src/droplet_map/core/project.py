@@ -72,17 +72,31 @@ class Project:
         if not feats:
             return []
         missing = pd.DataFrame({f: self.particles[f].isna().groupby(src).all() for f in feats})
-        odd = missing.index[missing.mean(axis=1) >= 0.5]
+        # judge "different format" against the measurements most particles have, so the columns an
+        # odd file brings along (e.g. ImageJ's Area, Circ.) do not make the normal files look odd
+        size = src.value_counts().reindex(missing.index)
+        share = (~missing).mul(size, axis=0).sum() / size.sum()
+        core = [f for f in feats if share[f] >= 0.5] or feats
+        odd = missing.index[missing[core].mean(axis=1) >= 0.5]
+        normal = [x for x in missing.index if x not in odd]
         lines = []
+        for x in odd:
+            cols = [f for f in core if missing.at[x, f]]
+            lines.append(f"• {x}: 표준 측정값 {len(cols)}개({', '.join(cols[:4])}{'…' if len(cols) > 4 else ''})가 없어 "
+                         "이 파일의 입자는 분석에서 제외했습니다. 열 이름이 다른 형식의 파일인지 확인하세요.")
+        only_odd = [f for f in feats if normal and missing.loc[normal, f].all()]
+        for f in only_odd:
+            self.roles.spec(f).role = "measure"
+        if only_odd and len(odd):
+            lines.append(f"• 위 파일에만 있는 열 {len(only_odd)}개({', '.join(only_odd[:4])}{'…' if len(only_odd) > 4 else ''})는 "
+                         "분석에 넣지 않았습니다.")
         for f in feats:
-            files = [x for x in missing.index[missing[f]] if x not in odd]
+            if f in only_odd:
+                continue
+            files = [x for x in normal if missing.at[x, f]]
             if files:
                 self.roles.spec(f).role = "measure"
                 lines.append(f"• '{f}' 측정값을 분석에서 뺐습니다 (없는 파일: {', '.join(files)})")
-        for x in odd:
-            cols = [f for f in feats if missing.at[x, f]]
-            lines.append(f"• {x}: 측정값 {len(cols)}개({', '.join(cols[:4])}{'…' if len(cols) > 4 else ''})가 없어 "
-                         "이 파일의 입자는 분석에서 빠집니다. 열 이름이 다른 형식의 파일인지 확인하세요.")
         if not lines:
             return []
         return ["파일마다 있는 측정값이 다릅니다.\n" + "\n".join(lines) +
