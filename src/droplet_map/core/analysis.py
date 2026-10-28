@@ -114,12 +114,18 @@ class ParticleMap:
     clusters: np.ndarray
 
 
-def particle_map(p: Prepared, s: Settings, progress=None) -> ParticleMap:
+def particle_map(p: Prepared, s: Settings, progress=None, idx=None) -> ParticleMap:
+    """UMAP + Leiden of all particles, or only of the rows in `idx` (a sub-map for drilling into
+    one cluster or selection: neighbours and scaling are then found among those particles only)."""
     import umap  # heavy import (numba); keep it out of module import time
     import igraph as ig
     import leidenalg
 
     X = map_matrix(p, s)
+    if idx is not None:
+        X = X[np.asarray(idx)]
+        if len(X) < 10:
+            raise ValueError("하위 지도를 그리기에는 입자가 너무 적습니다 (10개 이상 필요).")
     if progress:
         progress("이웃 그래프와 UMAP 계산 중…")
     reducer = umap.UMAP(n_neighbors=min(s.n_neighbors, max(2, len(X) - 1)), min_dist=0.3,
@@ -138,6 +144,24 @@ def particle_map(p: Prepared, s: Settings, progress=None) -> ParticleMap:
     order = {c: i for i, c in enumerate(pd.Series(cl).value_counts().index)}
     cl = np.array([order[c] for c in cl])
     return ParticleMap(emb, cl)
+
+
+def cohesion(emb: np.ndarray, labels, max_n=4000, seed=0) -> float | None:
+    """Mean silhouette of `labels` on the map (-1..1): higher = each label sits in its own region.
+    Labels that are None / NaN are left out; None when fewer than two labels remain."""
+    from sklearn.metrics import silhouette_score
+
+    lab = pd.Series(labels, dtype=object)
+    ok = lab.notna().to_numpy()
+    if lab[ok].nunique() < 2 or ok.sum() < 10:
+        return None
+    X, y = emb[ok], lab[ok].astype(str).to_numpy()
+    if len(X) > max_n:
+        sel = np.random.default_rng(seed).choice(len(X), max_n, replace=False)
+        X, y = X[sel], y[sel]
+        if len(set(y)) < 2:
+            return None
+    return float(silhouette_score(X, y))
 
 
 # ---------------------------------------------------------------- group level

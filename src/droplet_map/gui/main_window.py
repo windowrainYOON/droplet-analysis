@@ -8,7 +8,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..core.analysis import run_all
 from ..core.project import Project
-from .common import app_icon, set_group_names, warn
+from .common import app_icon, set_group_names, warn, worker_thread
 from .compare_page import ComparePage
 from .conditions_page import ConditionsPage
 from .data_page import DataPage
@@ -82,6 +82,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cond_page.changed.connect(self._conditions_changed)
         self.map_page.run_requested.connect(self.run_analysis)
         self.score_page.score_changed.connect(self._score_changed)
+        # one set of measurement weights, shown on both pages
+        self.map_page.weights.changed.connect(self._weights_changed)
+        self.score_page.weights.changed.connect(self._weights_changed)
 
         self.progress = QtWidgets.QProgressBar(); self.progress.setRange(0, 0); self.progress.setMaximumWidth(160); self.progress.hide()
         self.statusBar().addPermanentWidget(self.progress)
@@ -130,8 +133,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dirty = True
         self._update_title()
 
+    def _weights_changed(self):
+        self.map_page.weights.refresh()
+        self.score_page.weights.refresh()
+        self._mark_dirty()
+        if self.result is not None:
+            self.stale_label.setText("가중치가 바뀌었습니다. '분석 실행'(또는 지도 페이지의 '가중치 적용')으로 다시 계산하세요.")
+
     def _mark_stale(self):
         self._mark_dirty()
+        if self.project is not None:
+            self.map_page.features_changed()
+            self.score_page.features_changed()
         if self.result is not None:
             self.stale_label.setText("설정이 바뀌었습니다. '분석 실행'으로 다시 계산하세요.")
 
@@ -241,7 +254,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._collect_settings()
         self.progress.show()
         self.actions["run"].setEnabled(False)
-        self._thread = QtCore.QThread(self)
+        self._thread = worker_thread(self)
         self._worker = Worker(self.project)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)

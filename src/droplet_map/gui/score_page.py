@@ -6,7 +6,7 @@ import pandas as pd
 from PySide6 import QtCore, QtWidgets
 
 from ..core.analysis import reference_score
-from .common import MplCanvas, color, fill_table, info_label, short_group, title_label, warn
+from .common import MplCanvas, WeightsTable, color, fill_table, info_label, short_group, title_label, warn
 
 
 class ScorePage(QtWidgets.QWidget):
@@ -35,10 +35,9 @@ class ScorePage(QtWidgets.QWidget):
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         wbox = QtWidgets.QGroupBox("측정값 가중치 (0 = 무시)")
         wl = QtWidgets.QVBoxLayout(wbox)
-        self.weights = QtWidgets.QTableWidget(0, 2)
-        self.weights.setHorizontalHeaderLabels(["측정값", "가중치"])
-        self.weights.horizontalHeader().setStretchLastSection(True)
+        self.weights = WeightsTable()
         wl.addWidget(self.weights)
+        wl.addWidget(info_label("입자 지도 페이지의 가중치와 같은 값입니다. 바꾼 뒤 'score 다시 계산'을 누르세요."))
         split.addWidget(wbox)
         tabs = QtWidgets.QTabWidget()
         self.rank = MplCanvas(self, 6, 6)
@@ -63,6 +62,7 @@ class ScorePage(QtWidgets.QWidget):
         self.project = project
         self.result = None
         self.scale.setValue(project.settings.score_scale)
+        self.features_changed()
         self._update_refs()
 
     def _update_refs(self):
@@ -72,29 +72,19 @@ class ScorePage(QtWidgets.QWidget):
     def conditions_changed(self):
         self._update_refs()
 
-    def _fill_weights(self):
-        feats = self.result.prepared.features
-        fw = self.project.settings.feature_weights
-        self.weights.setRowCount(len(feats))
-        for i, f in enumerate(feats):
-            it = QtWidgets.QTableWidgetItem(f + (" (형태)" if f in self.result.prepared.shape_features else ""))
-            it.setFlags(it.flags() & ~QtCore.Qt.ItemIsEditable)
-            self.weights.setItem(i, 0, it)
-            sp = QtWidgets.QDoubleSpinBox(); sp.setRange(0, 10); sp.setSingleStep(0.5); sp.setValue(float(fw.get(f, 1.0)))
-            sp.setProperty("feature", f)
-            self.weights.setCellWidget(i, 1, sp)
+    def features_changed(self):
+        if self.project is None:
+            return
+        roles = self.project.roles
+        feats = roles.features()
+        self.weights.set_features(feats, [f for f in feats if roles.spec(f).shape], self.project.settings)
 
     def apply_settings(self):
-        s = self.project.settings
-        s.score_scale = float(self.scale.value())
-        for i in range(self.weights.rowCount()):
-            sp = self.weights.cellWidget(i, 1)
-            if sp is not None:
-                s.feature_weights[sp.property("feature")] = float(sp.value())
+        self.project.settings.score_scale = float(self.scale.value())
 
     def set_result(self, result):
         self.result = result
-        self._fill_weights()
+        self.weights.refresh()
         groups = result.profiles.groups
         cur = self.cmp_group.currentText()
         self.cmp_group.blockSignals(True); self.cmp_group.clear()

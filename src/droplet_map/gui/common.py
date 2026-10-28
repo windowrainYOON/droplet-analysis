@@ -131,3 +131,109 @@ def app_icon() -> QtGui.QIcon:
         return QtGui.QIcon(str(p))
     except Exception:
         return QtGui.QIcon()
+
+
+class WeightsTable(QtWidgets.QTableWidget):
+    """Per-measurement weights, written straight into settings.feature_weights.
+    The map page and the score page each show one; `changed` lets the other one refresh."""
+    changed = QtCore.Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(0, 2, parent)
+        self.setHorizontalHeaderLabels(["측정값", "가중치"])
+        self.horizontalHeader().setStretchLastSection(True)
+        self.verticalHeader().hide()
+        self.settings = None
+
+    def set_features(self, features, shape_features, settings):
+        self.settings = settings
+        fw = settings.feature_weights
+        self.setRowCount(len(features))
+        for i, f in enumerate(features):
+            it = QtWidgets.QTableWidgetItem(f + (" (형태)" if f in shape_features else ""))
+            it.setFlags(it.flags() & ~QtCore.Qt.ItemIsEditable)
+            self.setItem(i, 0, it)
+            sp = QtWidgets.QDoubleSpinBox(); sp.setRange(0, 10); sp.setSingleStep(0.5); sp.setDecimals(2)
+            sp.setValue(float(fw.get(f, 1.0)))
+            sp.setProperty("feature", f)
+            sp.valueChanged.connect(lambda v, f=f: self._set(f, v))
+            self.setCellWidget(i, 1, sp)
+        self.resizeColumnToContents(0)
+
+    def _set(self, f, v):
+        if self.settings is not None:
+            self.settings.feature_weights[f] = float(v)
+            self.changed.emit()
+
+    def refresh(self):
+        if self.settings is None:
+            return
+        for i in range(self.rowCount()):
+            sp = self.cellWidget(i, 1)
+            v = float(self.settings.feature_weights.get(sp.property("feature"), 1.0))
+            if sp.value() != v:
+                sp.blockSignals(True); sp.setValue(v); sp.blockSignals(False)
+
+    def reset(self):
+        if self.settings is None:
+            return
+        for i in range(self.rowCount()):
+            self.settings.feature_weights[self.cellWidget(i, 1).property("feature")] = 1.0
+        self.refresh()
+        self.changed.emit()
+
+
+class FuncWorker(QtCore.QObject):
+    """Runs fn() on a QThread; see run_in_thread."""
+    finished = QtCore.Signal(object)
+    failed = QtCore.Signal(str)
+
+    def __init__(self, fn):
+        super().__init__()
+        self.fn = fn
+
+    @QtCore.Slot()
+    def run(self):
+        import traceback
+        try:
+            self.finished.emit(self.fn())
+        except Exception as e:  # shown to the user
+            self.failed.emit(f"{e}\n\n{traceback.format_exc()}")
+
+
+# numba (UMAP) compiles on first use and overflows QThread's 512 KB default stack on macOS,
+# which kills the app without a Python traceback.
+WORKER_STACK = 64 * 1024 * 1024
+
+
+def worker_thread(parent) -> QtCore.QThread:
+    th = QtCore.QThread(parent)
+    th.setStackSize(WORKER_STACK)
+    return th
+
+
+class _Relay(QtCore.QObject):
+    """Lives on the GUI thread, so worker signals reach the callbacks there (queued)."""
+    done = QtCore.Signal(object)
+    fail = QtCore.Signal(str)
+
+
+def run_in_thread(owner, fn, done, failed):
+    """Start fn() in the background; done(result) / failed(message) run on the GUI thread."""
+    th = worker_thread(owner)
+    wk = FuncWorker(fn)
+    wk.moveToThread(th)
+    relay = _Relay(owner)
+    th.started.connect(wk.run)
+    wk.finished.connect(relay.done)
+    wk.failed.connect(relay.fail)
+
+    def _finish(cb, arg):
+        th.quit(); th.wait()
+        owner._bg = None
+        relay.deleteLater()
+        cb(arg)
+    relay.done.connect(lambda r: _finish(done, r))
+    relay.fail.connect(lambda m: _finish(failed, m))
+    owner._bg = (th, wk, relay)   # keep them alive
+    th.start()
