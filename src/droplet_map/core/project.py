@@ -12,11 +12,12 @@ import pandas as pd
 
 from .io import ColumnRoles, combine_frames, content_digest, guess_roles, read_particle_csv
 from .conditions import ConditionTable
-from .analysis import Settings
+from .analysis import Settings, group_profiles, prepare
+from .batch_map import Descriptors, batch_descriptors
 from .batches import UNASSIGNED, Batches, batches_from_conditions, merged_conditions
 from .delivery import Delivery, read_delivery_csv
 
-FORMAT_VERSION = 2
+FORMAT_VERSION = 3
 
 
 @dataclass
@@ -51,6 +52,25 @@ class Project:
     @property
     def delivery_view(self) -> ConditionTable:
         return merged_conditions(self.delivery.groups(), self.delivery.conditions, self.batches)
+
+    def particle_measures(self, prepared=None) -> tuple[pd.DataFrame, dict]:
+        """Formation group x measurement (median robust z; shape values size-weighted) plus
+        particles per image, with units. These feed the batch description."""
+        p = prepared if prepared is not None else prepare(self.particles, self.roles, self.settings)
+        prof = group_profiles(p)
+        m = prof.median_z.copy()
+        units = {c: "z" for c in m.columns}
+        col = "이미지당 입자 수 (평균)"
+        if col in prof.image_stats:
+            m["이미지당 입자 수"] = prof.image_stats[col]
+            units["이미지당 입자 수"] = "개"
+        return m, units
+
+    def batch_descriptors(self, prepared=None) -> Descriptors:
+        meas, units = self.particle_measures(prepared) if len(self.particles) else (None, {})
+        dm = self.delivery.measures() if not self.delivery.empty() else None
+        return batch_descriptors(self.batches, meas, self.conditions, dm, self.delivery.conditions,
+                                 kinds=self.settings.bm_kinds, particle_unit=units)
 
     def batch_of(self, group) -> str:
         return self.batches.batch_of(group)
@@ -175,7 +195,7 @@ class Project:
     def load(cls, path) -> "Project":
         path = Path(path)
         with zipfile.ZipFile(path) as z:
-            df = pd.read_csv(io.BytesIO(z.read("particles.csv")), low_memory=False,
+            df = pd.read_csv(io.BytesIO(z.read("particles.csv")), low_memory=False, float_precision="round_trip",
                              dtype={"group": str, "image": str, "source_file": str})
             for c in ("group", "image"):
                 df[c] = df[c].astype(str)

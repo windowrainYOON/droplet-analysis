@@ -15,6 +15,7 @@ UNASSIGNED = "배치 미지정"
 BATCH_COLUMN = "배치"                       # name of the batch column in merged condition views
 BATCH_PREFIX = "배치: "                     # batch-level conditions in merged views
 OLD_BATCH_NAMES = ("정제 배치", "배치", "batch", "Batch", "purification batch", "Purification batch")
+DEFAULT_CATEGORIES = ("정제 조건", "in vitro 관측", "세포 전달")   # what describes a batch; the user can add more
 
 
 class Batches:
@@ -25,6 +26,44 @@ class Batches:
         self.table.values.index.name = "batch"
         self.of: dict[str, str] = dict(of or {})
         self.references: set[str] = set()       # reference batches (score against matched groups)
+        self.categories: list[str] = list(DEFAULT_CATEGORIES)
+        self.category_of: dict[str, str] = {}   # batch table column -> category
+
+    # ---- description categories ------------------------------------------
+    def category(self, column: str) -> str:
+        c = self.category_of.get(column)
+        return c if c in self.categories else self.categories[0]
+
+    def set_category(self, column: str, category: str):
+        self.add_category(category)
+        self.category_of[column] = category
+
+    def add_category(self, name: str):
+        name = name.strip()
+        if not name:
+            raise ValueError("범주 이름을 입력하세요.")
+        if name not in self.categories:
+            self.categories.append(name)
+
+    def rename_category(self, old: str, new: str):
+        new = new.strip()
+        if not new or new == old:
+            return
+        if new in self.categories:
+            raise ValueError(f"'{new}' 범주가 이미 있습니다.")
+        self.categories = [new if c == old else c for c in self.categories]
+        self.category_of = {k: (new if v == old else v) for k, v in self.category_of.items()}
+
+    def remove_category(self, name: str):
+        """Its columns move to the first remaining category. The last category cannot go."""
+        if len(self.categories) <= 1:
+            raise ValueError("범주가 하나는 있어야 합니다.")
+        self.categories = [c for c in self.categories if c != name]
+        self.category_of = {k: v for k, v in self.category_of.items() if v != name}
+
+    def rename_column(self, old: str, new: str):
+        if old in self.category_of:
+            self.category_of[new] = self.category_of.pop(old)
 
     # ---- batches --------------------------------------------------------
     def names(self) -> list[str]:
@@ -104,13 +143,16 @@ class Batches:
 
     # ---- persistence ----------------------------------------------------
     def to_dict(self) -> dict:
-        return {"table": self.table.to_dict(), "of": dict(self.of), "references": sorted(self.references)}
+        return {"table": self.table.to_dict(), "of": dict(self.of), "references": sorted(self.references),
+                "categories": list(self.categories), "category_of": dict(self.category_of)}
 
     @classmethod
     def from_dict(cls, d: dict) -> "Batches":
         t = d.get("table", {})
         b = cls(ConditionTable.from_dict(t, list(t.get("values", {}))), d.get("of", {}))
         b.references = set(d.get("references", []))
+        b.categories = list(d.get("categories") or DEFAULT_CATEGORIES)
+        b.category_of = dict(d.get("category_of", {}))
         return b
 
 

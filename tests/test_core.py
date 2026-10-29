@@ -328,3 +328,46 @@ def test_delivery_summary(tmp_path):
     back = Project.load(tmp_path / "d.dmap")
     assert back.delivery.uses == d.uses and back.delivery.conditions.value(d.groups()[1], "시간") == "10"
     assert all(back.batch_of(g) == "A" for g in back.all_groups())
+
+
+# ---------------------------------------------------------------- batch map (0.4)
+def test_batch_descriptors_trends_matched_and_direct():
+    from droplet_map.demo import demo_project
+    from droplet_map.core.batch_map import KIND_TREND, KIND_MATCHED, KIND_DIRECT, batch_distance_map, batch_scores
+    pr = demo_project(per_image=40)
+    d = pr.batch_descriptors()
+    kinds = set(d.meta["kind"])
+    assert {KIND_TREND, KIND_MATCHED, KIND_DIRECT} <= kinds
+    # B04 ran pH only (NaCl fixed): it still gets a pH trend, but no NaCl trend
+    assert pd.notna(d.values.at["B04", "circularity / pH"]) and pd.isna(d.values.at["B04", "circularity / NaCl"])
+    # better batches gain more circularity per pH unit
+    assert d.values.at["B01", "circularity / pH"] > d.values.at["B05", "circularity / pH"]
+    # dates typed as text count as days
+    assert d.meta.at["정제일", "type"] == "numeric" and d.values.at["B05", "정제일"] > 100
+    assert d.meta.at["제타 포텐셜", "category"] == "in vitro 관측"
+    bm = batch_distance_map(d)
+    D = bm.distance
+    assert D.at["B01", "B02"] < D.at["B01", "B05"]
+    assert bm.coords is not None and bm.explained[0] > 50
+    ax = bm.coords["축 1"]
+    assert abs(pd.Series(ax).rank().corr(pd.Series(range(5), index=ax.index), method="spearman")) > 0.8
+    s = batch_scores(bm, "B01")
+    assert s["B01"] == 100 and s["B02"] > s["B05"]
+    # category weight 0 and skipped parts change the map
+    only_purif = batch_distance_map(d, weights={"in vitro 관측": 0, "세포 전달": 0})
+    assert set(only_purif.by_category) == {"정제 조건"}
+    no_trend = batch_distance_map(d, skip={"입자 · 경향"})
+    assert not any("/ pH" in it for it in no_trend.used)
+
+
+def test_batch_categories_save_and_one_batch(tmp_path):
+    from droplet_map.core.batch_map import batch_distance_map
+    pr = Project.from_csv([_write(synthetic(n_groups=4), tmp_path / "a.csv")], batch="A")
+    pr.batches.add_category("안정성")
+    pr.batches.table.add_condition(ConditionDef("응집 시작 (일)", "numeric"))
+    pr.batches.set_category("응집 시작 (일)", "안정성")
+    pr.save(tmp_path / "p.dmap")
+    q = Project.load(tmp_path / "p.dmap")
+    assert "안정성" in q.batches.categories and q.batches.category("응집 시작 (일)") == "안정성"
+    bm = batch_distance_map(q.batch_descriptors())
+    assert bm.coords is None and list(bm.distance.index) == ["A"]

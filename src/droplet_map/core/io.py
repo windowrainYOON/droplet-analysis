@@ -65,7 +65,8 @@ def read_particle_csv(path: str | Path) -> pd.DataFrame:
     """Read one CSV exported by the image analysis step (UTF-8 with or without BOM)."""
     path = Path(path)
     # group / image names stay text: "01" must not turn into 1
-    df = pd.read_csv(path, encoding="utf-8-sig", dtype={"group": str, "image": str}, keep_default_na=True)
+    df = pd.read_csv(path, encoding="utf-8-sig", dtype={"group": str, "image": str}, keep_default_na=True,
+                     float_precision="round_trip")
     df.columns = [str(c).strip() for c in df.columns]
     if "group" not in df.columns:
         # One file = one group when the file has no group column.

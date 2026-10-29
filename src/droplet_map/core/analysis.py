@@ -29,6 +29,11 @@ class Settings:
     map_skip_features: list = field(default_factory=list)   # measurements left out of the map
     map_skip_values: dict = field(default_factory=dict)     # condition -> values whose groups are left out ("" = not recorded)
     map_skip_groups: list = field(default_factory=list)     # groups left out by name
+    # batch map:
+    bm_kinds: dict = field(default_factory=dict)      # "입자:경향" -> on/off (defaults in batch_map.DEFAULT_SOURCES)
+    bm_weights: dict = field(default_factory=dict)    # category -> weight (default 1; 0 = off)
+    bm_skip: list = field(default_factory=list)       # items, parts or categories left out of the distance
+    bm_color: str = ""                                # item or batch column that colours the batch map
 
     def to_dict(self):
         return asdict(self)
