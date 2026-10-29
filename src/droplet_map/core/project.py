@@ -68,7 +68,11 @@ class Project:
 
     def batch_descriptors(self, prepared=None) -> Descriptors:
         meas, units = self.particle_measures(prepared) if len(self.particles) else (None, {})
-        dm = self.delivery.measures() if not self.delivery.empty() else None
+        dm = None
+        if not self.delivery.empty():           # intensities and ratios only (not region areas or counts)
+            chans = self.delivery.channels()
+            dm = self.delivery.measures()
+            dm = dm[[c for c in dm.columns if any(c.endswith(" · " + ch) for ch in chans)]]
         return batch_descriptors(self.batches, meas, self.conditions, dm, self.delivery.conditions,
                                  kinds=self.settings.bm_kinds, particle_unit=units)
 
@@ -214,7 +218,7 @@ class Project:
                 batches, moved = batches_from_conditions(cond)
                 if moved:
                     notes.append(f"조건 '{moved}'을(를) 배치로 옮겼습니다. 배치는 이제 그룹 위의 층이고, "
-                                 "조건 탭 위쪽의 배치 표에서 배치 조건을 넣을 수 있습니다.")
+                                 "'배치 표' 탭에서 배치 값(정제 조건, 제타 포텐셜 …)을 넣을 수 있습니다.")
         pr = cls(df, roles, cond, settings, path, ui, log, batches=batches, delivery=delivery)
         pr.notes = notes
         return pr

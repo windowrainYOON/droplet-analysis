@@ -1,5 +1,8 @@
-"""Main window: left group list · center views · right settings tabs, one menu per feature,
-auto-detecting import, work log and background workers."""
+"""Main window: left batch › group list · center views · right settings tabs, one menu per feature,
+auto-detecting import, work log and background workers.
+
+Main flow: 배치 지도 · 배치 표 · 배치 비교 (batch level). Data entry: 데이터 · 그룹 조건. Particle level
+(입자 지도, 조건 비교, 기준 score, 세포 전달) opens from the 입자 수준 menu or from a batch on the map."""
 from __future__ import annotations
 
 import time
@@ -16,7 +19,9 @@ from ..core.batches import UNASSIGNED
 from ..core.io import classify_file
 from ..core.project import Project
 from .common import app_icon, save_figure_dialog, save_frame_dialog, set_group_names, warn
+from .batch_map_page import BatchMapPage
 from .batch_page import BatchPage
+from .batch_table_page import BatchTablePage
 from .compare_page import ComparePage
 from .conditions_page import ConditionsPage
 from .data_page import DataPage
@@ -63,15 +68,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1500, 920)
         self.setAcceptDrops(True)
 
+        self.batch_map_page = BatchMapPage(self)
+        self.batch_table_page = BatchTablePage(self)
+        self.batch_page = BatchPage(self)
         self.data_page = DataPage(self)
         self.cond_page = ConditionsPage(self)
         self.map_page = MapPage(self)
         self.compare_page = ComparePage(self)
         self.score_page = ScorePage(self)
-        self.batch_page = BatchPage(self)
         self.delivery_page = DeliveryPage(self)
-        self.pages = [self.data_page, self.cond_page, self.map_page, self.compare_page, self.batch_page,
-                      self.score_page, self.delivery_page]
+        self.pages = [self.batch_map_page, self.batch_table_page, self.batch_page, self.cond_page, self.data_page,
+                      self.map_page, self.compare_page, self.score_page, self.delivery_page]
+        # particle level: closed until asked for (입자 수준 menu, or a batch on the batch map)
+        self.particle_pages = [self.map_page, self.compare_page, self.score_page, self.delivery_page]
 
         self.groups_panel = GroupPanel()
         self.weights = WeightsPanel()
@@ -112,6 +121,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.map_page.batch_maps_requested.connect(self.run_batch_maps)
         self.score_page.recompute_requested.connect(self.recompute_score)
         self.weights.changed.connect(self._weights_changed)
+        self.batch_map_page.descriptors_ready.connect(self._descriptors_ready)
+        self.batch_map_page.settings_changed.connect(self._batch_map_settings_changed)
+        self.batch_map_page.particle_map_requested.connect(self.open_batch_particles)
+        self.batch_map_page.compare_requested.connect(self.open_batch_compare)
+        self.batch_table_page.changed.connect(self._batch_table_changed)
+        self.batch_table_page.kinds_changed.connect(self._batch_kinds_changed)
 
         self.progress = QtWidgets.QProgressBar(); self.progress.setRange(0, 0); self.progress.setMaximumWidth(160); self.progress.hide()
         self.statusBar().addPermanentWidget(self.progress)
@@ -135,6 +150,7 @@ class MainWindow(QtWidgets.QMainWindow):
         f = mb.addMenu("파일")
         self._act(f, "새 프로젝트 (입자 CSV)…", self.new_from_csv, QtGui.QKeySequence.New)
         self._act(f, "불러오기 (자동 인식)…", self.import_files, QtGui.QKeySequence.Open)
+        self._act(f, "가상 예제 프로젝트 열기 (배치 5개)", self.open_demo)
         self.recent_menu = f.addMenu("최근 프로젝트")
         self._fill_recent()
         f.addSeparator()
@@ -149,26 +165,55 @@ class MainWindow(QtWidgets.QMainWindow):
         q.setMenuRole(QtGui.QAction.QuitRole)
 
         self.tab_actions = {}
+        bmm = mb.addMenu("배치 지도")
+        self.tab_actions[self.batch_map_page] = self._act(bmm, "배치 지도 탭 열기", lambda on: self._set_tab_open(self.batch_map_page, on), checkable=True)
+        bmm.addSeparator()
+        self.a_bmap = self._act(bmm, "배치 지도 다시 계산", self.batch_map_page.compute, "Ctrl+B")
+        bmm.addSeparator()
+        self._act(bmm, "배치 지도 그림 저장…", lambda: self._save_fig(self.batch_map_page.canvas, "batch_map"))
+        self._act(bmm, "범주별 지도 그림 저장…", lambda: self._save_fig(self.batch_map_page.cat_canvas, "batch_map_by_category"))
+        self._act(bmm, "거리 표 그림 저장…", lambda: self._save_fig(self.batch_map_page.dist_canvas, "batch_distance_matrix"))
+        self._act(bmm, "배치 군집 그림 저장…", lambda: self._save_fig(self.batch_map_page.tree_canvas, "batch_dendrogram"))
+        self._act(bmm, "지도 좌표 · 거리 표 저장 (CSV)…", self._save_batch_map_tables)
+        self._act(bmm, "기준 배치 score 표 저장 (CSV)…", self._save_batch_map_score)
+
+        btm = mb.addMenu("배치 표")
+        self.tab_actions[self.batch_table_page] = self._act(btm, "배치 표 탭 열기", lambda on: self._set_tab_open(self.batch_table_page, on), checkable=True)
+        btm.addSeparator()
+        self._act(btm, "배치 값 CSV 불러오기…", lambda: self._need_project() and self.cond_page.import_csv())
+        self._act(btm, "배치 표 저장 (직접 입력 + 계산한 항목, CSV)…", self._save_batch_items)
+
+        bm = mb.addMenu("배치 비교")
+        self.tab_actions[self.batch_page] = self._act(bm, "배치 비교 탭 열기", lambda on: self._set_tab_open(self.batch_page, on), checkable=True)
+        bm.addSeparator()
+        self._act(bm, "항목 차이 그림 저장…", lambda: self._save_fig(self.batch_page.item_canvas, "batch_item_difference"))
+        self._act(bm, "항목 차이 표 저장 (CSV)…", self._save_batch_items_diff)
+        bm.addSeparator()
+        self._act(bm, "같은 조건 기준 배치 score 계산 (입자 수준)", lambda: self._need_result() and self.batch_page.compute_score())
+        self._act(bm, "같은 조건 배치 거리 그림 저장…", lambda: self._save_fig(self.batch_page.dist, "batch_distance"))
+        self._act(bm, "같은 조건 측정값 차이 그림 저장…", lambda: self._save_fig(self.batch_page.delta, "batch_difference"))
+        self._act(bm, "같은 조건 기준 배치 score 표 저장 (CSV)…", self._save_batch_score)
+
         dm = mb.addMenu("데이터")
         self.tab_actions[self.data_page] = self._act(dm, "데이터 탭 열기", lambda on: self._set_tab_open(self.data_page, on), checkable=True)
+        self.tab_actions[self.cond_page] = self._act(dm, "그룹 조건 탭 열기", lambda on: self._set_tab_open(self.cond_page, on), checkable=True)
         dm.addSeparator()
         self.a_add = self._act(dm, "입자 CSV 추가…", self.add_csv)
         self._act(dm, "세포 전달 요약 CSV 추가…", self.add_delivery)
+        dm.addSeparator()
+        self._act(dm, "조건 CSV 불러오기 (그룹 또는 배치)…", lambda: self._need_project() and self.cond_page.import_csv())
+        self._act(dm, "조건 CSV 저장…", lambda: self._need_project() and self.cond_page.export_csv())
+        self._act(dm, "조건 목록 템플릿 불러오기…", lambda: self._need_project() and self.cond_page.load_template())
+        self._act(dm, "조건 목록 템플릿 저장…", lambda: self._need_project() and self.cond_page.save_template())
+        dm.addSeparator()
         self.a_save_particles = self._act(dm, "입자 표 저장 (QC 통과 + 지도 좌표·군집, CSV)…", self._save_particles)
 
-        cm = mb.addMenu("조건")
-        self.tab_actions[self.cond_page] = self._act(cm, "조건 탭 열기", lambda on: self._set_tab_open(self.cond_page, on), checkable=True)
-        cm.addSeparator()
-        self._act(cm, "조건 CSV 불러오기…", lambda: self._need_project() and self.cond_page.import_csv())
-        self._act(cm, "조건 CSV 저장…", lambda: self._need_project() and self.cond_page.export_csv())
-        cm.addSeparator()
-        self._act(cm, "조건 목록 템플릿 불러오기…", lambda: self._need_project() and self.cond_page.load_template())
-        self._act(cm, "조건 목록 템플릿 저장…", lambda: self._need_project() and self.cond_page.save_template())
-
-        mm = mb.addMenu("입자 지도")
+        pl = mb.addMenu("입자 수준")
+        self.a_run = self._act(pl, "입자 분석 실행", self.run_analysis, "Ctrl+R")
+        pl.addSeparator()
+        mm = pl.addMenu("입자 지도")
         self.tab_actions[self.map_page] = self._act(mm, "입자 지도 탭 열기", lambda on: self._set_tab_open(self.map_page, on), checkable=True)
         mm.addSeparator()
-        self.a_run = self._act(mm, "분석 실행 (전체)", self.run_analysis, "Ctrl+R")
         self._act(mm, "상위 지도로", self.map_page.go_up, "Ctrl+Up")
         mm.addSeparator()
         self._act(mm, "지도 그림 저장 (PNG)…", self._save_map_png)
@@ -177,7 +222,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._act(mm, "선택 영역 요약 그림 저장…", lambda: self._save_fig(self.map_page.sel_canvas, "selection_summary"))
         self._act(mm, "입자 + 군집 표 저장 (CSV)…", self._save_particles)
 
-        pm = mb.addMenu("조건 비교")
+        pm = pl.addMenu("조건 비교")
         self.tab_actions[self.compare_page] = self._act(pm, "조건 비교 탭 열기", lambda on: self._set_tab_open(self.compare_page, on), checkable=True)
         pm.addSeparator()
         self._act(pm, "추세 그림 저장…", lambda: self._save_fig(self.compare_page.trend, "condition_trend"))
@@ -185,15 +230,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._act(pm, "유사도 그림 저장…", lambda: self._save_fig(self.compare_page.sim, "group_similarity"))
         self._act(pm, "그룹 요약 표 저장 (CSV)…", self._save_group_summary)
 
-        bm = mb.addMenu("배치 비교")
-        self.tab_actions[self.batch_page] = self._act(bm, "배치 비교 탭 열기", lambda on: self._set_tab_open(self.batch_page, on), checkable=True)
-        bm.addSeparator()
-        self._act(bm, "기준 배치 score 계산", lambda: self._need_result() and self.batch_page.compute_score())
-        self._act(bm, "배치 간 거리 그림 저장…", lambda: self._save_fig(self.batch_page.dist, "batch_distance"))
-        self._act(bm, "배치 차이 그림 저장…", lambda: self._save_fig(self.batch_page.delta, "batch_difference"))
-        self._act(bm, "기준 배치 score 표 저장 (CSV)…", self._save_batch_score)
-
-        sm = mb.addMenu("기준 score")
+        sm = pl.addMenu("기준 score")
         self.tab_actions[self.score_page] = self._act(sm, "기준 score 탭 열기", lambda on: self._set_tab_open(self.score_page, on), checkable=True)
         sm.addSeparator()
         self._act(sm, "score 다시 계산", self.recompute_score)
@@ -201,7 +238,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._act(sm, "분포 비교 그림 저장…", lambda: self._save_fig(self.score_page.dist, "reference_distributions"))
         self._act(sm, "score 표 저장 (CSV)…", self._save_score)
 
-        vm = mb.addMenu("세포 전달")
+        vm = pl.addMenu("세포 전달")
         self.tab_actions[self.delivery_page] = self._act(vm, "세포 전달 탭 열기", lambda on: self._set_tab_open(self.delivery_page, on), checkable=True)
         vm.addSeparator()
         self._act(vm, "세포 전달 요약 CSV 추가…", self.add_delivery)
@@ -212,6 +249,7 @@ class MainWindow(QtWidgets.QMainWindow):
             a.setChecked(True)
 
         tb = self.addToolBar("main"); tb.setMovable(False); tb.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        tb.addAction(self.a_bmap)
         tb.addAction(self.a_run)
         self.elapsed = QtWidgets.QLabel(""); self.elapsed.setStyleSheet("color:#555;padding-left:10px;")
         tb.addWidget(self.elapsed)
@@ -229,7 +267,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def _set_enabled(self, on):
-        for a in (self.a_save, self.a_saveas, self.a_export, self.a_add, self.a_run, self.a_save_particles):
+        for a in (self.a_save, self.a_saveas, self.a_export, self.a_add, self.a_run, self.a_save_particles, self.a_bmap):
             a.setEnabled(on)
         self.weights.setEnabled(on)
 
@@ -285,6 +323,49 @@ class MainWindow(QtWidgets.QMainWindow):
     def _visible_changed(self):
         self.map_page.set_visible_groups(self.groups_panel.visible_groups())
         self.map_page.visible_changed_for_map()
+        self.batch_map_page.set_visible_batches(self.groups_panel.visible_batches())
+
+    # ---- batch level ------------------------------------------------------
+    def _descriptors_ready(self, desc):
+        self.batch_table_page.set_descriptors(desc)
+        self._batch_map_settings_changed(dirty=False)
+
+    def _batch_map_settings_changed(self, dirty=True):
+        bm = self.batch_map_page.bm
+        self.batch_page.set_descriptors(self.batch_map_page.desc, bm.used if bm is not None else None)
+        if dirty:
+            self._mark_dirty()
+
+    def _batch_table_changed(self):
+        self._conditions_changed()
+        self.cond_page.refresh_all()
+        self.batch_map_page.compute()
+
+    def _batch_kinds_changed(self):
+        self._mark_dirty()
+        self.batch_map_page.compute()
+        self.log("배치 지도에 쓸 계산 항목: " + ", ".join(k for k, v in self.project.settings.bm_kinds.items() if v))
+
+    def open_batch_compare(self, a, b):
+        self._set_tab_open(self.batch_page, True)
+        self.batch_page.show_pair(a, b)
+
+    def open_batch_particles(self, batch):
+        """Particle level for one batch: the particle map of that batch's particles only."""
+        if not self._need_project():
+            return
+        self._set_tab_open(self.map_page, True)
+        self.log(f"입자 수준으로: 배치 {batch}")
+        if self.result is None or self._needs_full_run():
+            self._after_analysis = lambda: self.open_batch_particles(batch)
+            self.run_analysis()
+            return
+        rows = self.map_page.batch_rows().get(batch)
+        if rows is None or not len(rows):
+            warn(self, f"'{batch}' 배치에는 분석된 입자가 없습니다."); return
+        while len(self.map_page.levels) > 1:
+            self.map_page.go_up()
+        self.run_submap(rows, f"배치 {batch}")
 
     def _map_inputs_changed(self):
         self._mark_dirty()
@@ -307,7 +388,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _conditions_changed(self):
         self._mark_dirty()
         self.groups_panel.refresh()
-        for p in (self.map_page, self.compare_page, self.score_page, self.batch_page, self.delivery_page):
+        for p in (self.map_page, self.compare_page, self.score_page, self.batch_page, self.delivery_page,
+                  self.batch_table_page, self.batch_map_page):
             p.conditions_changed()
         if self.result is not None:
             self.statusBar().showMessage("조건이 바뀌었습니다. 연관 분석은 '분석 실행' 후에 갱신됩니다.")
@@ -317,6 +399,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cond_page.model.refresh()
         self.score_page.conditions_changed()
         self.batch_page.conditions_changed()
+        self.batch_table_page.refresh()
+        self.batch_map_page._fill_batch_combos()
+        self.batch_map_page.draw_score(); self.batch_map_page.draw()
         self.log("기준 그룹: " + (", ".join(sorted(self.project.conditions.references)) or "없음"))
         self.recompute_score()
 
@@ -355,8 +440,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_enabled(True)
         self._restore_ui(project.ui)
         self._update_title()
-        self.log(f"불러옴: 그룹 {len(project.groups)}개 · 입자 {len(project.particles):,}개")
-        self.map_page.set_stale("아직 분석 전입니다. 툴바의 '분석 실행'(⌘R)을 누르세요.")
+        self.batch_map_page.visible = self.groups_panel.visible_batches()
+        self.batch_map_page.compute()
+        n_b = len([b for b in project.batches.names() if b != UNASSIGNED])
+        self.log(f"불러옴: 배치 {n_b}개 · 그룹 {len(project.groups)}개 · 입자 {len(project.particles):,}개")
+        self.map_page.set_stale("아직 분석 전입니다. 툴바의 '입자 분석 실행'(⌘R)을 누르세요.")
 
     def new_from_csv(self):
         if not self._confirm_discard():
@@ -400,6 +488,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log(f"입자 CSV {len(paths)}개 열기: " + ", ".join(Path(p).name for p in paths))
         self._show_notes(pr.notes)
         self._set_tab_open(self.cond_page, True)
+
+    def open_demo(self):
+        """Synthetic five-batch project, to try the batch level before real batches exist."""
+        if not self._confirm_discard():
+            return
+        from ..demo import demo_project
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            pr = demo_project()
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        self.set_project(pr, dirty=True)
+        self.log("가상 예제 프로젝트: 배치 5개 (B01 품질 높음 → B05 낮음), 배치마다 실험한 조건이 조금씩 다름, 제타 포텐셜·세포 전달 포함")
+        self._set_tab_open(self.batch_map_page, True)
 
     def _show_notes(self, notes):
         for n in notes:
@@ -449,6 +551,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.groups_panel.refresh()
         self.delivery_page.refresh()
         self.batch_page.conditions_changed()
+        self.batch_table_page.refresh()
+        self.batch_map_page.compute()
         n = len(self.project.delivery.groups()) - n0
         self.log(f"세포 전달 CSV 추가: 그룹 {n}개 (" + ", ".join(Path(p).name for p in paths) + ")")
         self._show_notes(notes)
@@ -586,21 +690,26 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _ui_state(self) -> dict:
         return {"open_tabs": [p.title for p in self.pages if self.center.isTabVisible(self.pages.index(p))],
+                "closed_tabs": [p.title for p in self.pages if not self.center.isTabVisible(self.pages.index(p))],
                 "current_tab": self.center.currentIndex(),
                 "right_tab": self.right.currentIndex(),
                 "visible_groups": sorted(self.groups_panel.visible_groups()),
                 "known_groups": sorted(self.project.groups) if self.project else [],
                 "map": self.map_page.ui_state(), "compare": self.compare_page.ui_state(), "score": self.score_page.ui_state(),
-                "batch": self.batch_page.ui_state(), "delivery": self.delivery_page.ui_state()}
+                "batch": self.batch_page.ui_state(), "delivery": self.delivery_page.ui_state(),
+                "batch_map": self.batch_map_page.ui_state(), "batch_table": self.batch_table_page.ui_state()}
 
     def _restore_ui(self, st):
         st = st or {}
-        open_tabs = st.get("open_tabs")
+        closed = st.get("closed_tabs")
+        if closed is None:          # new project, or saved before 0.4: particle level closed, the rest open
+            closed = [p.title for p in self.particle_pages]
         for i, p in enumerate(self.pages):
-            on = open_tabs is None or p.title in open_tabs
+            on = p.title not in closed
             self.center.setTabVisible(i, on)
             self.tab_actions[p].setChecked(on)
-        self.center.setCurrentIndex(int(st.get("current_tab", 1 if open_tabs is None else 0)))
+        cur = int(st.get("current_tab", 0)) if "closed_tabs" in st else 0
+        self.center.setCurrentIndex(cur if self.center.isTabVisible(cur) else 0)
         self._center_changed(self.center.currentIndex())
         self.right.setCurrentIndex(int(st.get("right_tab", 0)))
         if "visible_groups" in st:
@@ -614,6 +723,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.score_page.restore_ui(st.get("score"))
         self.batch_page.restore_ui(st.get("batch"))
         self.delivery_page.restore_ui(st.get("delivery"))
+        self.batch_map_page.restore_ui(st.get("batch_map"))
+        self.batch_table_page.restore_ui(st.get("batch_table"))
 
     # ---- background work -------------------------------------------------
     def _start(self, label, fn, on_done):
@@ -696,6 +807,10 @@ class MainWindow(QtWidgets.QMainWindow):
         n_cl = len(set(result.pmap.clusters)) if result.pmap is not None else 0
         self.log(f"분석 완료 ({dt:.1f}초) — 입자 {len(result.prepared.data):,}개 (QC 제외 {result.prepared.n_dropped:,}개), 군집 {n_cl}개")
         self._mark_dirty()
+        then = getattr(self, "_after_analysis", None)
+        if then is not None:
+            self._after_analysis = None
+            QtCore.QTimer.singleShot(0, then)
 
     def _needs_full_run(self):
         s = self.project.settings
@@ -798,6 +913,43 @@ class MainWindow(QtWidgets.QMainWindow):
             if p:
                 self.log(f"score 표 저장: {p}")
 
+    def _save_batch_map_tables(self):
+        bm = self.batch_map_page.bm
+        if bm is None:
+            warn(self, "배치 지도를 먼저 계산하세요."); return
+        t = bm.distance.copy()
+        if bm.coords is not None:
+            t = bm.coords.join(t)
+        p = save_frame_dialog(self, t, "batch_map_coords_distance.csv")
+        if p:
+            self.log(f"배치 지도 좌표·거리 저장: {p}")
+
+    def _save_batch_map_score(self):
+        f = self.batch_map_page.score_frame()
+        if f is None:
+            warn(self, "배치 지도 탭에서 기준 배치를 고르세요."); return
+        p = save_frame_dialog(self, f, "batch_map_score.csv")
+        if p:
+            self.log(f"기준 배치 score 저장: {p}")
+
+    def _save_batch_items(self):
+        d = self.batch_map_page.desc
+        if d is None:
+            warn(self, "배치 지도를 먼저 계산하세요."); return
+        out = d.meta.T.reindex(columns=d.values.columns)
+        out = pd.concat([out, d.values.astype(object)])
+        p = save_frame_dialog(self, out.T, "batch_items.csv")
+        if p:
+            self.log(f"배치 표 저장: {p}")
+
+    def _save_batch_items_diff(self):
+        t = self.batch_page.items
+        if t is None or t.empty:
+            warn(self, "배치 비교 탭에서 두 배치를 고르세요."); return
+        p = save_frame_dialog(self, t, "batch_item_difference.csv", index=False)
+        if p:
+            self.log(f"항목 차이 표 저장: {p}")
+
     def _save_batch_score(self):
         s = self.batch_page.score_frame()
         if s is None:
@@ -819,7 +971,9 @@ class MainWindow(QtWidgets.QMainWindow):
         out = {}
         if self.result is not None and self.map_page.current() is not None:
             out["map_particle_map"] = self.map_page.save_map_image
-        for prefix, page, names in (("map", self.map_page, ("cluster_canvas", "comp_canvas", "sel_canvas")),
+        for prefix, page, names in (("batchmap", self.batch_map_page, ("canvas", "cat_canvas", "dist_canvas", "tree_canvas", "score_canvas")),
+                                    ("batchcompare", self.batch_page, ("item_canvas",)),
+                                    ("map", self.map_page, ("cluster_canvas", "comp_canvas", "sel_canvas")),
                                     ("compare", self.compare_page, ("trend", "assoc", "sim")),
                                     ("score", self.score_page, ("rank", "dist")),
                                     ("batch", self.batch_page, ("dist", "delta", "score_canvas")),
@@ -851,7 +1005,7 @@ class MainWindow(QtWidgets.QMainWindow):
         parts = self.map_page.particles_frame() if self.result is not None else None
         files = write_exports(out, self.project, self.result, which,
                               self.figures() if which.get("figures") else {}, particles=parts,
-                              batch_score=self.batch_page.score_frame())
+                              batch_score=self.batch_page.score_frame(), batch_map=self.batch_map_page)
         keep = self.project.path
         self.project.ui = self._ui_state()
         self.project.save(out / f"{(keep.stem if keep else 'droplet_project')}.dmap")

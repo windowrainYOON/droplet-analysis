@@ -343,7 +343,16 @@ def _axis_items(desc: Descriptors, sc: dict, coords: pd.DataFrame, top=3) -> dic
             if np.isfinite(r):
                 rows.append((it, float(r), float(np.nanmax(xs) - np.nanmin(xs))))
         rows.sort(key=lambda t: (-round(abs(t[1]), 2), -t[2]))
-        out[ax] = [(it, r) for it, r, _s in rows[:top]]
+        seen, picked = set(), []
+        for it, r, _s in rows:           # one item per measurement and kind (not CH1 @ 12 conditions)
+            key = (desc.meta.at[it, "measure"], desc.meta.at[it, "kind"])
+            if key in seen:
+                continue
+            seen.add(key)
+            picked.append((it, r))
+            if len(picked) == top:
+                break
+        out[ax] = picked
     return out
 
 

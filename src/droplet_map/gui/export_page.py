@@ -10,14 +10,15 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from .common import info_label
 
 
-EXPORT_ITEMS = (("particles", "입자별 표 (QC 통과 입자 + 현재 지도 좌표 + 군집 + 신뢰도 w)"),
+EXPORT_ITEMS = (("batch_map", "배치 지도 (배치 표 전체 항목, 거리 표, 지도 좌표, 기준 배치 score)"),
+                ("particles", "입자별 표 (QC 통과 입자 + 현재 지도 좌표 + 군집 + 신뢰도 w)"),
                 ("groups", "그룹 요약 (중앙값, 이미지 통계, n_eff, 조건)"),
                 ("score", "기준 score와 Δ"),
                 ("assoc", "조건 × 파라미터 연관 (강도, 부호, n)"),
                 ("distance", "그룹 간 거리 행렬"),
                 ("composition", "그룹별 군집 구성 비율 (현재 지도)"),
                 ("conditions", "조건 표 (배치, 배치 조건, 그룹 조건; 세포 전달 그룹 포함)"),
-                ("batch", "기준 배치 score (배치 비교 탭에서 계산한 경우)"),
+                ("batch", "같은 조건 기준 배치 score (배치 비교 탭에서 계산한 경우)"),
                 ("delivery", "세포 전달 요약 (영역별 강도, 세포질/입자 비율)"),
                 ("settings", "분석 설정값 (settings.json)"),
                 ("figures", "현재 그림 전부 (PNG, 200 dpi)"))
@@ -51,7 +52,8 @@ def export_folder_name(project) -> str:
     return (project.path.stem if project.path else "droplet_map") + "_" + datetime.now().strftime("%Y%m%d-%H%M")
 
 
-def write_exports(out: Path, project, result, which: dict, figures: dict, particles=None, batch_score=None) -> list[Path]:
+def write_exports(out: Path, project, result, which: dict, figures: dict, particles=None, batch_score=None,
+                  batch_map=None) -> list[Path]:
     out.mkdir(parents=True, exist_ok=True)
     files = []
 
@@ -60,6 +62,17 @@ def write_exports(out: Path, project, result, which: dict, figures: dict, partic
         df.to_csv(p, index=index, encoding="utf-8-sig")
         files.append(p)
 
+    if which.get("batch_map") and batch_map is not None and batch_map.desc is not None:
+        d = batch_map.desc
+        csv(pd.concat([d.meta.T.reindex(columns=d.values.columns), d.values.astype(object)]).T, "batch_items.csv")
+        bm = batch_map.bm
+        if bm is not None:
+            csv(bm.distance, "batch_distance.csv")
+            if bm.coords is not None:
+                csv(bm.coords, "batch_map_coords.csv")
+        sc = batch_map.score_frame()
+        if sc is not None:
+            csv(sc, "batch_map_score.csv")
     if which.get("conditions"):
         p = out / "conditions.csv"; p.write_text(_conditions_csv(project), encoding="utf-8-sig"); files.append(p)
     if result is not None:

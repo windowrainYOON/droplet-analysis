@@ -1,7 +1,7 @@
-"""Condition editor. Top: batches (purification) and their conditions. Below: the groups made from
-each batch's protein, in two tabs (particle formation, cell delivery), each with its own conditions.
-A group always belongs to one batch; the batch's conditions show in the group tables as grey,
-read-only columns. Blank cells mean "not recorded"."""
+"""Group condition editor: the groups made from each batch's protein, in two tabs (particle
+formation, cell delivery), each with its own conditions. A group always belongs to one batch; the
+batch's values (edited on the batch table page) show here as grey, read-only columns. Blank cells
+mean "not recorded". The table model and editing helpers are shared with the batch table page."""
 from __future__ import annotations
 
 import json
@@ -106,6 +106,8 @@ class GroupTableModel(QtCore.QAbstractTableModel):
             c = self.project.batches.table.get(key)
             return f"[배치]\n{c.label}"
         c = self.table().get(key)
+        if self.which == "batch":
+            return f"[{self.project.batches.category(key)}]\n{c.label}"
         return f"[{KIND_LABELS[c.kind]}]\n{c.label}"
 
     def data(self, idx, role=QtCore.Qt.DisplayRole):
@@ -304,10 +306,76 @@ class ConditionTableView(QtWidgets.QTableView):
 TABLE_LABELS = {"batch": "배치 표", "formation": "입자 형성 그룹 표", "delivery": "세포 전달 그룹 표"}
 
 
-class ConditionsPage(QtCore.QObject):
-    """Center: batch table over the group tables. Right: editing tools. Files live in the 조건 menu."""
+class TableEditing:
+    """Copy / paste / fill / clear on ConditionTableView tables. Needs self.view, self.active,
+    self._after_edit."""
+
+    def _selected_rows(self, table):
+        m = table.model()
+        return [m.rows[r] for r in sorted({i.row() for i in table.selectedIndexes()})]
+
+    def _editable_selection(self, table=None):
+        table = table or self.active
+        m = table.model()
+        return [i for i in table.selectedIndexes() if m.cols[i.column()][0] in ("own", "uses")]
+
+    def fill_selected(self):
+        sel = self._editable_selection()
+        if not sel:
+            warn(self.view, "값을 넣을 칸을 먼저 고르세요 (⌘ 또는 Shift로 여러 칸)."); return
+        text, ok = QtWidgets.QInputDialog.getText(self.view, "선택 칸 한 번에 입력", f"{len(sel)}칸에 넣을 값 (비우면 '기록 안 함'):")
+        if ok:
+            m = self.active.model()
+            for i in sel:
+                m.setData(i, text)
+            self._after_edit()
+
+    def clear_selected(self, table=None):
+        table = table or self.active
+        for i in self._editable_selection(table):
+            table.model().setData(i, "")
+        self._after_edit()
+
+    def copy(self, table=None):
+        table = table or self.active
+        sel = table.selectedIndexes()
+        if not sel:
+            return
+        m = table.model()
+        rows = sorted({i.row() for i in sel}); cols = sorted({i.column() for i in sel})
+        lines = []
+        for r in rows:
+            vals = []
+            for c in cols:
+                v = m.data(m.index(r, c), QtCore.Qt.EditRole)
+                if v is None:
+                    v = m.data(m.index(r, c), QtCore.Qt.DisplayRole)
+                vals.append("" if v is None else str(v))
+            lines.append("\t".join(vals))
+        QtWidgets.QApplication.clipboard().setText("\n".join(lines))
+
+    def paste(self, table=None):
+        table = table or self.active
+        text = QtWidgets.QApplication.clipboard().text()
+        if not text:
+            return
+        m = table.model()
+        cur = table.currentIndex()
+        if not cur.isValid() or not m.editable(cur.column()):
+            warn(self.view, "붙여넣을 위치(조건 칸)를 먼저 고르세요."); return
+        rows = [r.split("\t") for r in text.rstrip("\n").split("\n")]
+        for dr, vals in enumerate(rows):
+            for dc, v in enumerate(vals):
+                r, c = cur.row() + dr, cur.column() + dc
+                if r < m.rowCount() and c < m.columnCount() and m.editable(c) and m.cols[c][0] != "name":
+                    m.setData(m.index(r, c), v.strip())
+        self._after_edit()
+
+
+class ConditionsPage(QtCore.QObject, TableEditing):
+    """Center: group tables (formation, delivery). Right: editing tools. Files live in the 데이터 menu."""
     changed = QtCore.Signal()
-    title = "조건"
+    title = "그룹 조건"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -315,16 +383,7 @@ class ConditionsPage(QtCore.QObject):
         self.models, self.tables = {}, {}
         self.view = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(self.view)
-        lay.addWidget(title_label("조건 편집기"))
-        split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-
-        top = QtWidgets.QWidget(); tl = QtWidgets.QVBoxLayout(top); tl.setContentsMargins(0, 0, 0, 0)
-        head = QtWidgets.QLabel("<b>배치 (정제 조건)</b> — 그룹은 모두 배치 하나에 속하고, 배치 조건을 물려받습니다.")
-        head.setWordWrap(True)
-        tl.addWidget(head)
-        tl.addWidget(self._make_table("batch"), 1)
-        split.addWidget(top)
-
+        lay.addWidget(title_label("그룹 조건"))
         bottom = QtWidgets.QWidget(); bl = QtWidgets.QVBoxLayout(bottom); bl.setContentsMargins(0, 0, 0, 0)
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel("<b>그룹</b> (배치에서 나온 단백질로 한 실험)"))
@@ -339,19 +398,17 @@ class ConditionsPage(QtCore.QObject):
         self.group_tabs.addTab(self._make_table("delivery"), "세포 전달")
         self.group_tabs.currentChanged.connect(lambda i: self._set_active(self.tables["formation" if i == 0 else "delivery"]))
         bl.addWidget(self.group_tabs, 1)
-        split.addWidget(bottom)
-        split.setStretchFactor(0, 1); split.setStretchFactor(1, 3)
-        lay.addWidget(split, 1)
+        lay.addWidget(bottom, 1)
         self.coverage = QtWidgets.QLabel(); self.coverage.setStyleSheet("color:#666;"); self.coverage.setWordWrap(True)
         lay.addWidget(self.coverage)
         self.active = self.tables["formation"]
 
         self.active_label = QtWidgets.QLabel(""); self.active_label.setWordWrap(True)
         batches = section("배치",
-                          info_label("배치 = 단백질 정제 한 번. 배치 조건(정제일, 농도 …)은 그 배치의 모든 그룹에 적용됩니다. "
-                                     "배치 이름은 배치 표에서 두 번 눌러 바꿉니다. ★ = 기준 배치 (같은 조건의 그룹끼리 비교)."),
-                          flow_buttons((("+ 배치 추가", self.add_batch), ("배치 삭제", self.remove_batch),
-                                        ("선택 그룹 → 배치 지정…", self.assign_batch))))
+                          info_label("그룹은 모두 정제 배치 하나에 속합니다. 배치 추가·삭제와 배치 값(정제 조건, 제타 포텐셜 …)은 "
+                                     "'배치 표' 탭에서 고칩니다. 회색 [배치] 열은 그 값입니다. 그룹 조건은 배치마다 "
+                                     "'조건에 따른 변화(경향)'를 계산하는 데 쓰입니다."),
+                          flow_buttons((("선택 그룹 → 배치 지정…", self.assign_batch),)))
         cols = section("조건 열",
                        info_label("아래 버튼은 마지막으로 누른 표에 적용됩니다."), self.active_label,
                        flow_buttons((("+ 조건 추가", self.add_condition), ("조건 편집", self.edit_condition),
@@ -365,9 +422,9 @@ class ConditionsPage(QtCore.QObject):
                         info_label("'사용한 입자 형성 그룹'에 이 실험에 쓴 입자를 만든 그룹을 고르면, 세포 전달 결과와 "
                                    "그 입자의 모양·score를 나란히 볼 수 있습니다. 세포 전달 요약 CSV는 '파일 › 불러오기'나 "
                                    "끌어 놓기로 넣습니다."))
-        ref = section("기준", info_label("입자 형성 표의 ★ = 기준 그룹(원하는 상태). 배치 표의 ★ = 기준 배치. "
+        ref = section("기준", info_label("입자 형성 표의 ★ = 기준 그룹(원하는 상태, 입자 수준 score에 씁니다). "
                                         "왼쪽 목록에서 오른쪽 클릭으로도 지정합니다."))
-        files = section("파일", info_label("조건 CSV·템플릿 불러오기와 저장은 메뉴 막대의 '조건' 메뉴에 있습니다."))
+        files = section("파일", info_label("조건 CSV·템플릿 불러오기와 저장은 메뉴 막대의 '데이터' 메뉴에 있습니다."))
         self.panel = scroll_panel(batches, cols, vals, deliv, ref, files)
         self._set_active(self.active)
 
@@ -469,39 +526,6 @@ class ConditionsPage(QtCore.QObject):
         self._edited()
 
     # ---- batches --------------------------------------------------------
-    def add_batch(self):
-        name, ok = QtWidgets.QInputDialog.getText(self.view, "배치 추가", "새 배치 이름 (예: 정제 로트 번호):")
-        if ok and name.strip():
-            try:
-                self.project.batches.add(name)
-            except ValueError as e:
-                warn(self.view, str(e)); return
-            self._after_edit()
-
-    def _selected_rows(self, table):
-        m = table.model()
-        return [m.rows[r] for r in sorted({i.row() for i in table.selectedIndexes()})]
-
-    def remove_batch(self):
-        sel = self._selected_rows(self.tables["batch"])
-        sel = [b for b in sel if b != UNASSIGNED]
-        if not sel:
-            warn(self.view, "배치 표에서 지울 배치를 먼저 고르세요."); return
-        b = sel[0]
-        others = [x for x in self.project.batches.names() if x not in (b, UNASSIGNED)]
-        n = len(self.project.batches.groups_in(b, self.project.all_groups()))
-        target = UNASSIGNED
-        if n:
-            items = [UNASSIGNED] + others
-            target, ok = QtWidgets.QInputDialog.getItem(self.view, "배치 삭제",
-                                                        f"'{b}'의 그룹 {n}개를 어느 배치로 옮길까요?", items, 0, False)
-            if not ok:
-                return
-        elif QtWidgets.QMessageBox.question(self.view, "배치 삭제", f"'{b}' 배치를 지울까요?") != QtWidgets.QMessageBox.Yes:
-            return
-        self.project.batches.remove(b, target)
-        self._after_edit()
-
     def assign_batch(self):
         table = self.tables["formation" if self.group_tabs.currentIndex() == 0 else "delivery"]
         groups = self._selected_rows(table)
@@ -539,7 +563,7 @@ class ConditionsPage(QtCore.QObject):
     def _header_double(self, table, section):
         self._set_active(table)
         if table.model().cols[section][0] == "inh":
-            warn(self.view, "회색 [배치] 열은 위쪽 배치 표에서 고칩니다.")
+            warn(self.view, "회색 [배치] 열은 '배치 표' 탭에서 고칩니다.")
             return
         self.edit_condition(section)
 
@@ -582,64 +606,6 @@ class ConditionsPage(QtCore.QObject):
         self._after_edit()
         if not filled:
             warn(self.view, "새로 채울 빈칸이 없습니다 (이름에서 값을 찾지 못했거나 이미 입력됨).")
-
-    # ---- values ---------------------------------------------------------
-    def _editable_selection(self, table=None):
-        table = table or self.active
-        m = table.model()
-        return [i for i in table.selectedIndexes() if m.cols[i.column()][0] in ("own", "uses")]
-
-    def fill_selected(self):
-        sel = self._editable_selection()
-        if not sel:
-            warn(self.view, "값을 넣을 칸을 먼저 고르세요 (⌘ 또는 Shift로 여러 칸)."); return
-        text, ok = QtWidgets.QInputDialog.getText(self.view, "선택 칸 한 번에 입력", f"{len(sel)}칸에 넣을 값 (비우면 '기록 안 함'):")
-        if ok:
-            m = self.active.model()
-            for i in sel:
-                m.setData(i, text)
-            self._after_edit()
-
-    def clear_selected(self, table=None):
-        table = table or self.active
-        for i in self._editable_selection(table):
-            table.model().setData(i, "")
-        self._after_edit()
-
-    def copy(self, table=None):
-        table = table or self.active
-        sel = table.selectedIndexes()
-        if not sel:
-            return
-        m = table.model()
-        rows = sorted({i.row() for i in sel}); cols = sorted({i.column() for i in sel})
-        lines = []
-        for r in rows:
-            vals = []
-            for c in cols:
-                v = m.data(m.index(r, c), QtCore.Qt.EditRole)
-                if v is None:
-                    v = m.data(m.index(r, c), QtCore.Qt.DisplayRole)
-                vals.append("" if v is None else str(v))
-            lines.append("\t".join(vals))
-        QtWidgets.QApplication.clipboard().setText("\n".join(lines))
-
-    def paste(self, table=None):
-        table = table or self.active
-        text = QtWidgets.QApplication.clipboard().text()
-        if not text:
-            return
-        m = table.model()
-        cur = table.currentIndex()
-        if not cur.isValid() or not m.editable(cur.column()):
-            warn(self.view, "붙여넣을 위치(조건 칸)를 먼저 고르세요."); return
-        rows = [r.split("\t") for r in text.rstrip("\n").split("\n")]
-        for dr, vals in enumerate(rows):
-            for dc, v in enumerate(vals):
-                r, c = cur.row() + dr, cur.column() + dc
-                if r < m.rowCount() and c < m.columnCount() and m.editable(c) and m.cols[c][0] != "name":
-                    m.setData(m.index(r, c), v.strip())
-        self._after_edit()
 
     # ---- files ----------------------------------------------------------
     def import_csv(self):

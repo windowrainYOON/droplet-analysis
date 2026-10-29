@@ -168,7 +168,7 @@ def run() -> int:
     check("배치 지정 (불러올 때)", pr.batches.names()[:2] == ["A", "B"] and {pr.batch_of(g) for g in bgroups} == {"B"}
           and pr.view.names()[0] == "배치", ", ".join(pr.batches.names()))
     w.cond_page.refresh_all()
-    check("조건 탭: 배치 표 + 그룹 표", w.cond_page.models["batch"].rowCount() == 2
+    check("배치 표 + 그룹 조건 표", w.batch_table_page.model.rowCount() == 2
           and w.cond_page.models["formation"].rowCount() == len(pr.groups))
     tree_batches = w.groups_panel.tree.topLevelItemCount()
     nvis = len(w.groups_panel.visible_groups())
@@ -226,10 +226,76 @@ def run() -> int:
     w.project.path = tmp / "no_such_dir" / "x.dmap"
     check("저장 실패 시 오류 표시 (앱 계속 동작)", w.save() is False and w.dirty)
     w.dirty = False
+    batch_level(w, check, wait, app, tmp)
+    w.dirty = False
     w.close()
     n_fail = checks.count(False)
     print(f"selftest: {len(checks) - n_fail}/{len(checks)} 통과", flush=True)
     return 1 if n_fail else 0
+
+
+def batch_level(w, check, wait, app, tmp):
+    """0.4: the batch map is the main view; the particle map opens for one batch."""
+    from .core.project import Project
+    w.open_demo(); app.processEvents()
+    bmp = w.batch_map_page
+    bm = bmp.bm
+    ok = bm is not None and bm.coords is not None and len(bm.batches) == 5
+    check("가상 예제: 배치 지도 (배치 5개, PCoA)", ok and bm.distance.at["B01", "B02"] < bm.distance.at["B01", "B05"],
+          "" if not ok else f"B01–B02 {bm.distance.at['B01', 'B02']:.2f} · B01–B05 {bm.distance.at['B01', 'B05']:.2f}")
+    vis = [w.center.isTabVisible(w.pages.index(p)) for p in (bmp, w.batch_table_page, w.batch_page, w.map_page)]
+    check("메인 흐름 탭 열림, 입자 수준 탭 닫힘", vis == [True, True, True, False])
+    d = bmp.desc
+    kinds = set(d.meta["kind"]) if d is not None else set()
+    check("배치 항목: 경향 · 같은 조건 · 직접 입력", {"경향", "같은 조건", "직접 입력"} <= kinds
+          and w.batch_table_page.derived.rowCount() > 50, f"항목 {0 if d is None else len(d.meta)}개")
+    check("경향: 배치마다 다른 조건이어도 계산 (B04는 pH만)", d is not None and pd.notna(d.values.at["B04", "circularity / pH"])
+          and d.values.at["B01", "circularity / pH"] > d.values.at["B05", "circularity / pH"])
+    bmp.weight_spins["in vitro 관측"].setValue(0); bmp.weight_spins["세포 전달"].setValue(0); app.processEvents()
+    only = set(bmp.bm.by_category)
+    bmp.weight_spins["in vitro 관측"].setValue(1); bmp.weight_spins["세포 전달"].setValue(1); app.processEvents()
+    check("범주 무게 0 = 범주 빼기", only == {"정제 조건"} and len(bmp.bm.by_category) == 3)
+    n_used = len(bmp.bm.used)
+    bmp.part_checks["입자 · 같은 조건"].setChecked(False); app.processEvents()
+    fewer = len(bmp.bm.used)
+    bmp.part_checks["입자 · 같은 조건"].setChecked(True); app.processEvents()
+    check("항목 묶음 끄기", fewer < n_used and len(bmp.bm.used) == n_used, f"{n_used} → {fewer}")
+    from .core.conditions import ConditionDef
+    b = w.project.batches
+    b.add_category("세포 독성")
+    b.table.add_condition(ConditionDef("세포 생존율", "numeric", "%"))
+    b.set_category("세포 생존율", "세포 독성")
+    for i, name in enumerate(["B01", "B02", "B03", "B04", "B05"]):
+        b.table.set_value(name, "세포 생존율", str(95 - 8 * i))
+    w.batch_table_page._edited(); app.processEvents()
+    check("범주·항목 추가 → 배치 지도에 반영", "세포 독성" in bmp.bm.by_category and "세포 생존율" in bmp.desc.values.columns)
+    bmp.ref.setCurrentText("B01"); app.processEvents()
+    sc = bmp.score_frame()
+    check("기준 배치 score (배치 지도)", sc is not None and sc.at["B01", "score"] == 100 and sc.at["B02", "score"] > sc.at["B05", "score"],
+          "" if sc is None else f"B02 {sc.at['B02', 'score']:.0f} · B05 {sc.at['B05', 'score']:.0f}")
+    w.open_batch_compare("B01", "B05"); app.processEvents()
+    t = w.batch_page.items
+    check("배치 비교: 항목 차이", w.center.currentWidget() is w.batch_page.view and len(t) > 20 and bool(w.batch_page.item_canvas.fig.axes))
+    w.open_batch_particles("B03")       # runs the particle analysis first, then the batch's sub-map
+    t0 = time.time()
+    while (w._thread is not None or len(w.map_page.levels) < 2) and time.time() - t0 < 300:
+        wait(w); app.processEvents(); time.sleep(0.05)
+    ok = w._thread is None
+    mp = w.map_page
+    cur = mp.current() if ok else None
+    on = set(w.result.prepared.data["group"].iloc[cur.idx]) if cur is not None and cur.idx is not None else set()
+    check("배치 → 입자 지도 (입자 수준으로)", cur is not None and cur.name == "배치 B03" and on and all(g.startswith("B03") for g in on)
+          and w.center.isTabVisible(w.pages.index(mp)), "" if cur is None else cur.name)
+    path = tmp / "demo.dmap"
+    w.project.path = path; w.save()
+    back = Project.load(path)
+    check("배치 범주·지도 설정 저장·열기", "세포 독성" in back.batches.categories and back.batches.category("세포 생존율") == "세포 독성"
+          and back.batches.references == {"B01"} and "closed_tabs" in back.ui)
+    out = tmp / "export_demo"
+    files = w.export_to(out, {"batch_map": True, "figures": True})
+    names = {p.name for p in files}
+    check("통합 저장: 배치 지도 표·그림", {"batch_items.csv", "batch_distance.csv", "batch_map_coords.csv"} <= names
+          and any(n.startswith("batchmap_canvas") for n in names), f"{len(files)}개 파일")
 
 
 if __name__ == "__main__":

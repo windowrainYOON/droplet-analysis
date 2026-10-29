@@ -24,7 +24,7 @@ class GroupPanel(QtWidgets.QWidget):
         head = QtWidgets.QLabel("배치 › 그룹")
         f = head.font(); f.setBold(True); f.setPointSize(f.pointSize() + 1); head.setFont(f)
         lay.addWidget(head)
-        lay.addWidget(info_label("체크한 입자 형성 그룹만 지도에 표시합니다. 배치를 체크하면 그 아래 그룹이 함께 바뀝니다. "
+        lay.addWidget(info_label("체크한 배치가 배치 지도에, 체크한 입자 형성 그룹이 입자 지도에 나옵니다. 배치를 펼치면 그룹이 보입니다. "
                                  "★ = 기준 (오른쪽 클릭으로 지정)."))
         self.tree = QtWidgets.QTreeWidget()
         self.tree.setHeaderHidden(True)
@@ -71,6 +71,8 @@ class GroupPanel(QtWidgets.QWidget):
         p = self.project
         if p is None:
             return
+        self._expanded = {self.tree.topLevelItem(i).data(0, QtCore.Qt.UserRole) for i in range(self.tree.topLevelItemCount())
+                          if self.tree.topLevelItem(i).isExpanded()}
         prev = self.visible_groups() if self.tree.topLevelItemCount() else None
         known = getattr(self, "_known", set()) if prev is not None else set()
         self._known = set(p.groups)
@@ -126,7 +128,7 @@ class GroupPanel(QtWidgets.QWidget):
                     ci.setToolTip(0, f"<b>{g}</b><br>사용한 입자: {used or '—'}")
                     di.addChild(ci)
                 bi.addChild(di)
-            bi.setExpanded(True)
+            bi.setExpanded(len([x for x in p.batches.names() if x != UNASSIGNED]) <= 1 or b in getattr(self, "_expanded", set()))
         self.tree.blockSignals(False)
         cur = self.cond.currentText()
         self.cond.blockSignals(True); self.cond.clear()
@@ -178,6 +180,16 @@ class GroupPanel(QtWidgets.QWidget):
     def _update_count(self):
         n = len(self.visible_groups())
         self.count.setText(f"지도에 표시: {n}/{len(self._group_items())}개 그룹")
+
+    def visible_batches(self) -> set:
+        """Batches shown on the batch map: checked (fully or partly), or without formation groups."""
+        out = set()
+        for i in range(self.tree.topLevelItemCount()):
+            b = self.tree.topLevelItem(i)
+            groups = [b.child(j) for j in range(b.childCount()) if b.child(j).data(0, KIND) == "group"]
+            if not groups or any(g.checkState(0) == QtCore.Qt.Checked for g in groups):
+                out.add(b.data(0, QtCore.Qt.UserRole))
+        return out
 
     def visible_groups(self) -> set:
         return {it.data(0, QtCore.Qt.UserRole) for it in self._group_items()
