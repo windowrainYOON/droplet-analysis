@@ -40,19 +40,32 @@ KIND_MATCHED = "같은 조건"
 KIND_LEVEL = "대표값"
 
 SRC_BATCH = "배치 표"
-SRC_PARTICLE = "입자"
+SRC_PARTICLE = "입자"          # legacy source names (projects before batch files)
 SRC_DELIVERY = "세포 전달"
 
-# which derived kinds are on by default, per source
-DEFAULT_SOURCES = {
-    f"{SRC_PARTICLE}:{KIND_TREND}": True,
-    f"{SRC_PARTICLE}:{KIND_MATCHED}": True,
-    f"{SRC_PARTICLE}:{KIND_LEVEL}": False,     # depends on which conditions a batch happened to run
-    f"{SRC_DELIVERY}:{KIND_TREND}": True,
-    f"{SRC_DELIVERY}:{KIND_MATCHED}": True,
-    f"{SRC_DELIVERY}:{KIND_LEVEL}": True,
-}
-SOURCE_CATEGORY = {SRC_PARTICLE: CAT_INVITRO, SRC_DELIVERY: CAT_DELIVERY}
+
+def kind_on(kinds: dict, source: str, kind: str, particle: bool = False) -> bool:
+    """Whether a derived kind is used for a source. Default: all on, except the batch median of
+    per-particle data (it mostly reflects which conditions a batch happened to run)."""
+    key = f"{source}:{kind}"
+    if key in (kinds or {}):
+        return bool(kinds[key])
+    return not (particle and kind == KIND_LEVEL)
+
+
+@dataclass
+class Source:
+    """One experiment kind that describes batches: a summary table (group x measurement) with the
+    groups' conditions and batches."""
+    name: str
+    category: str
+    measures: pd.DataFrame
+    cond: ConditionTable
+    batch_of: dict
+    unit: object = ""             # text, or {measurement: unit}
+    particle: bool = False
+
+
 META_COLUMNS = ["category", "source", "kind", "part", "measure", "condition", "unit", "type", "scale"]
 Z_SCALE = 2.0     # robust-z units that count as a full difference (median z, or z change over a condition's span)
 REL_FLOOR = 0.5   # other numbers: a difference counts in full only when it reaches half the typical size
@@ -107,16 +120,14 @@ def within_batch_trends(measures: pd.DataFrame, cond: ConditionTable, groups) ->
     return out
 
 
-def _derive(source: str, measures: pd.DataFrame, cond: ConditionTable, batches: Batches, groups,
-            kinds: dict, unit):
-    """Items from one experiment kind. measures: group x measure (numbers); unit: text or
-    {measure: text}."""
+def _derive(src: Source, kinds: dict):
+    """Items from one experiment kind."""
+    source, measures, cond, unit, cat = src.name, src.measures, src.cond, src.unit, src.category
     unit_of = (lambda m: unit.get(m, "")) if isinstance(unit, dict) else (lambda m: unit)
-    cat = SOURCE_CATEGORY[source]
-    groups = [g for g in groups if g in measures.index and batches.batch_of(g) != UNASSIGNED]
+    groups = [g for g in measures.index if src.batch_of.get(g, UNASSIGNED) != UNASSIGNED]
     by_batch: dict[str, list] = {}
     for g in groups:
-        by_batch.setdefault(batches.batch_of(g), []).append(g)
+        by_batch.setdefault(src.batch_of[g], []).append(g)
     vals: dict[str, dict] = {}
     meta: dict[str, dict] = {}
 
@@ -130,7 +141,7 @@ def _derive(source: str, measures: pd.DataFrame, cond: ConditionTable, batches: 
     def z_scale(m):
         return Z_SCALE if unit_of(m) == "z" else np.nan
 
-    if kinds.get(f"{source}:{KIND_TREND}", True):
+    if kind_on(kinds, source, KIND_TREND, src.particle):
         units = {c.name: c.unit for c in cond.schema}
         span = {c.name: float(np.ptp(v.dropna())) if (v := cond.numeric(c.name).reindex(groups)).notna().any() else np.nan
                 for c in cond.schema if c.kind == "numeric"}
@@ -141,12 +152,12 @@ def _derive(source: str, measures: pd.DataFrame, cond: ConditionTable, batches: 
                 # a z slope counts by the change it makes over the tested range of the condition
                 sc = Z_SCALE / span[c] if unit_of(m) == "z" and span.get(c, 0) > 0 else np.nan
                 put(f"{m} / {c}", b, slope, KIND_TREND, m, c, f"{mu}/{cu}" if cu else f"{mu}/단위", sc)
-    if kinds.get(f"{source}:{KIND_MATCHED}", True):
+    if kind_on(kinds, source, KIND_MATCHED, src.particle):
         keys = {}
         for g in groups:
             k = condition_key(cond, g)
             if k is not None:
-                keys.setdefault(k, {}).setdefault(batches.batch_of(g), g)
+                keys.setdefault(k, {}).setdefault(src.batch_of[g], g)
         for k, per_b in keys.items():
             if len(per_b) < 2:
                 continue
@@ -154,7 +165,7 @@ def _derive(source: str, measures: pd.DataFrame, cond: ConditionTable, batches: 
                 for m in measures.columns:
                     v = pd.to_numeric(pd.Series([measures.at[g, m]]), errors="coerce").iloc[0]
                     put(f"{m} @ {k}", b, float(v) if pd.notna(v) else None, KIND_MATCHED, m, k, unit_of(m), z_scale(m))
-    if kinds.get(f"{source}:{KIND_LEVEL}", True):
+    if kind_on(kinds, source, KIND_LEVEL, src.particle):
         for b, gs in by_batch.items():
             med = measures.loc[gs].apply(pd.to_numeric, errors="coerce").median()
             for m, v in med.items():
@@ -162,12 +173,9 @@ def _derive(source: str, measures: pd.DataFrame, cond: ConditionTable, batches: 
     return vals, meta
 
 
-def batch_descriptors(batches: Batches, particle_measures: pd.DataFrame | None = None,
-                      formation: ConditionTable | None = None, delivery_measures: pd.DataFrame | None = None,
-                      delivery_cond: ConditionTable | None = None, kinds: dict | None = None,
-                      particle_unit="z") -> Descriptors:
+def batch_descriptors(batches: Batches, sources=(), kinds: dict | None = None) -> Descriptors:
     """All items for all real batches (the unassigned pseudo batch is left out)."""
-    kinds = {**DEFAULT_SOURCES, **(kinds or {})}
+    kinds = dict(kinds or {})
     names = [b for b in batches.names() if b != UNASSIGNED]
     vals: dict[str, dict] = {}
     meta: dict[str, dict] = {}
@@ -181,13 +189,14 @@ def batch_descriptors(batches: Batches, particle_measures: pd.DataFrame | None =
         vals[c.name] = {b: col.get(b) for b in names if b in col.index and pd.notna(col.get(b))}
         meta[c.name] = dict(category=cat, source=SRC_BATCH, kind=KIND_DIRECT, part=f"{cat} · {KIND_DIRECT}",
                             measure=c.name, condition="", unit=unit, type=kind, scale=np.nan)
-    for src, measures, cond, unit in ((SRC_PARTICLE, particle_measures, formation, particle_unit),
-                                      (SRC_DELIVERY, delivery_measures, delivery_cond, "")):
-        if measures is None or cond is None or measures.empty:
+    for src in sources:
+        if src.measures is None or src.cond is None or src.measures.empty:
             continue
-        v, m = _derive(src, measures, cond, batches, list(measures.index), kinds, unit)
-        vals.update(v)
-        meta.update(m)
+        v, m = _derive(src, kinds)
+        for item, mm in m.items():
+            key = item if item not in meta else f"{src.name}: {item}"     # same measurement name in two sheets
+            vals[key] = v.get(item, {})
+            meta[key] = mm
     values = pd.DataFrame({k: pd.Series(v, dtype=object) for k, v in vals.items()}, index=names, dtype=object)
     values = values.reindex(columns=list(meta))
     for k, mm in meta.items():

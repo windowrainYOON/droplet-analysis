@@ -4,6 +4,8 @@ import pytest
 
 from droplet_map.core.analysis import Settings, prepare, reliability_weight, run_all
 from droplet_map.core.conditions import ConditionDef, ConditionTable
+from droplet_map.core.batchfile import (COND_ID, ITEM_NAME, read_batch_file, template, write_batch_file)
+from droplet_map.core.importing import add_particles
 from droplet_map.core.project import Project
 
 
@@ -24,16 +26,34 @@ def synthetic(n_groups=10, per_image=150, seed=0):
     return pd.concat(rows, ignore_index=True)
 
 
+def make_folder(tmp_path, batches: dict, name="data", ph=True, items=None) -> "Path":
+    """One batch file per batch; 조건 ID = the CSV group name; pH from the name when asked."""
+    folder = tmp_path / name
+    folder.mkdir(exist_ok=True)
+    for b, df in batches.items():
+        bf = template()
+        bf.set_item(ITEM_NAME, b)
+        for k, v in (items or {}).get(b, {}).items():
+            bf.set_item(k, v)
+        df = df.copy()
+        df["source_file"] = f"{b}.csv"
+        groups = list(pd.unique(df["group"]))
+        add_particles(bf, df, {g: g for g in groups})
+        cs = bf.conditions
+        if ph:
+            for r in range(len(cs.data)):
+                cid = cs.data.at[r, COND_ID]
+                if "pH" in cid:
+                    cs.set_value(r, "pH", cid.split("pH")[1])
+        write_batch_file(bf, folder / f"{b}.xlsx")
+    return folder
+
+
 @pytest.fixture
 def project(tmp_path):
-    p = tmp_path / "data.csv"
-    synthetic().to_csv(p, index=False)
-    pr = Project.from_csv([p])
+    pr = Project.open_folder(make_folder(tmp_path, {"A": synthetic()}))
     t = pr.conditions
-    t.add_condition(ConditionDef("pH", "numeric"))
     t.add_condition(ConditionDef("메모", "categorical"))
-    for g in pr.groups:
-        t.set_value(g, "pH", float(g.split("pH")[1]))
     t.set_value(pr.groups[0], "메모", "A")   # sparse: mostly blank
     t.references = {pr.groups[1]}
     return pr
@@ -65,7 +85,7 @@ def test_run_all_and_roundtrip(project, tmp_path):
     path = tmp_path / "p.dmap"
     project.save(path)
     back = Project.load(path)
-    assert back.conditions.to_dict() == project.conditions.to_dict()
+    assert back.conditions.references == project.conditions.references and back.folder == project.folder
     assert len(back.particles) == len(project.particles)
 
 
@@ -115,86 +135,81 @@ def _write(df, path):
     return path
 
 
-def test_multi_csv_missing_column_duplicates_and_image_names(tmp_path):
+def test_batch_file_roundtrip_check_and_copy(tmp_path):
+    bf = template()
+    bf.set_item(ITEM_NAME, "B1")
+    bf.set_item("제타 포텐셜", "-21.5")
+    cs = bf.conditions
+    cs.add_rows(3)
+    for i, ph in enumerate(("5", "6", "7")):
+        cs.set_value(i, "pH", ph)
+    assert bf.fill_condition_ids() == 3 and bf.condition_ids() == ["C01", "C02", "C03"]
+    cs.set_value(0, "NaCl", 150)
+    assert bf.condition_label("C01") == "pH 5 · NaCl 150 mM"
+    iv = bf.sheet("in vitro 실험")
+    iv.append_frame(pd.DataFrame({COND_ID: ["C01", "C09", None], "반복": [1, 1, 2], "FRAP 회복률": [50, "많음", 40]}))
+    msgs = [i.message for i in bf.check()]
+    assert any("C09" in m for m in msgs) and any("많음" in m for m in msgs) and any("조건 ID가 빈" in m for m in msgs)
+    iv.add_column(__import__("droplet_map.core.batchfile", fromlist=["Column"]).Column("점도", "cP"))
+    bf.add_sheet("DLS")
+    path = write_batch_file(bf, tmp_path / "B1")
+    back, notes = read_batch_file(path)
+    assert not notes and back.name == "B1" and [s.name for s in back.sheets][-1] == "DLS"
+    assert back.sheet("in vitro 실험").column("점도").unit == "cP" and back.items()[-1]["value"] == -21.5
+    assert back.sheet("DLS").kind == "조건별 측정" and back.conditions.column("NaCl").unit == "mM"
+    new = back.copy_for_new_batch("B2")
+    assert new.name == "B2" and len(new.sheet("in vitro 실험").data) == 0 and len(new.conditions.data) == 3
+
+
+def test_import_duplicates_odd_files_and_missing_columns(tmp_path):
+    from droplet_map.core.importing import read_particle_files, suggest_conditions, conditions_from_names
     df = synthetic(n_groups=4)
     a = _write(df[df["group"].str.contains("pH5|pH6")], tmp_path / "a.csv")
-    b = _write(df[~df["group"].str.contains("pH5|pH6")].drop(columns=["CH1_partition"]), tmp_path / "b.csv")
-    pr = Project.from_csv([a, b])
+    frame, notes = read_particle_files([a, a])
+    assert notes and set(frame["source_file"]) == {"a.csv"}
+    bf = template()
+    bf.set_item(ITEM_NAME, "A")
+    groups = list(pd.unique(frame["group"]))
+    assert suggest_conditions(bf, groups) == {g: None for g in groups}
+    ids = conditions_from_names(bf, groups)              # only when asked: values from the names
+    assert list(bf.conditions.text("pH")) == ["5", "6"] and suggest_conditions(bf, groups) == ids
+    n0 = add_particles(bf, frame, ids)
+    assert "입자" in n0[0] and len(bf.particles.data) == len(frame)
+    again = add_particles(bf, frame, ids)                 # the same data a second time is skipped
+    assert len(bf.particles.data) == len(frame) and "건너뛰" in again[0]
+    ij = pd.DataFrame({"group": "IJ", "image": "x", "Area": np.random.rand(60), "Circ.": np.random.rand(60),
+                       "Solidity": np.random.rand(60), "AR": 1 + np.random.rand(60), "source_file": "ij.csv"})
+    with pytest.raises(ValueError):
+        add_particles(bf, ij, {"IJ": "C01"})
+    # a batch whose particle sheet lacks a measurement switches it off for the analysis (reported)
+    other = synthetic(n_groups=4, seed=2).drop(columns=["CH1_partition"])
+    folder = make_folder(tmp_path, {"A": df, "B": other})
+    pr = Project.open_folder(folder)
     assert "CH1_partition" not in pr.roles.features() and any("CH1_partition" in n for n in pr.notes)
-    r = run_all(pr.particles, pr.roles, pr.conditions, Settings(), with_map=False)
-    assert set(r.prepared.data["source_file"]) == {"a.csv", "b.csv"}      # no file silently dropped
-    n = len(pr.particles)
-    notes = pr.add_csv([a])
-    assert len(pr.particles) == n and notes                             # same file not added twice
-    (tmp_path / "copy").mkdir()
-    import shutil
-    shutil.copy(a, tmp_path / "copy" / "renamed.csv")
-    assert pr.add_csv([tmp_path / "copy" / "renamed.csv"]) and len(pr.particles) == n   # same content, new name
-    other = df[df["group"].str.contains("pH5")].copy(); other["eq_diameter_um"] *= 1.1
-    (tmp_path / "exp2").mkdir()
-    o = _write(other, tmp_path / "exp2" / "a.csv")                     # same file name, other data
-    pr.add_csv([o])
-    assert len(pr.particles) == n + len(other) and "exp2/a.csv" in set(pr.particles["source_file"])
-    n = len(pr.particles)
-    c = _write(df[df["group"].str.contains("pH5")], tmp_path / "c.csv")  # same group + image names
-    pr.add_csv([c])
-    imgs = pr.particles[pr.particles["source_file"] == "c.csv"]["image"]
-    assert imgs.str.startswith("c:").all()
-    pr.save(tmp_path / "m.dmap")
-    back = Project.load(tmp_path / "m.dmap")
-    assert back.add_csv([a]) and len(back.particles) == len(pr.particles)   # duplicate check after reopen
 
 
-def test_odd_format_file_does_not_switch_off_measurements(tmp_path):
-    df = synthetic(n_groups=4)
-    a = _write(df, tmp_path / "a.csv")
-    ij = pd.DataFrame({"group": "IJ", "image": "x", "Area": np.random.rand(60), "Circ.": np.random.rand(60),
-                       "Solidity": np.random.rand(60), "AR": 1 + np.random.rand(60)})
-    b = _write(ij, tmp_path / "ij.csv")
-    pr = Project.from_csv([a, b])
-    assert "circularity" in pr.roles.features() and len(pr.notes) == 1 and "ij.csv" in pr.notes[0]
-
-
-
-def test_add_missing_column_file_and_odd_file_together(tmp_path):
-    df = synthetic(n_groups=4)
-    a = _write(df, tmp_path / "a.csv")
-    no_part = df.drop(columns=[c for c in df.columns if "partition" in c]).copy()
-    no_part["group"] = "B_" + no_part["group"]
-    no_part["circularity"] = no_part["circularity"] * 0.9
-    b = _write(no_part, tmp_path / "b.csv")
-    ij = pd.DataFrame({"group": "IJ", "image": "x", "Area": np.random.rand(60), "Circ.": np.random.rand(60),
-                       "Solidity": np.random.rand(60), "AR": 1 + np.random.rand(60)})
-    c = _write(ij, tmp_path / "ij.csv")
-    pr = Project.from_csv([a])
-    notes = pr.add_csv([b, c])
-    feats = pr.roles.features()
-    assert not any("partition" in f for f in feats) and "circularity" in feats
-    assert not {"Area", "Circ."} & set(feats)
-    text = "\n".join(notes)
-    assert "b.csv" in text and "ij.csv: 표준 측정값" in text
-    prep = prepare(pr.particles, pr.roles, pr.settings)
-    assert (prep.data["source_file"] == "b.csv").any() and not (prep.data["source_file"] == "ij.csv").any()
-
-def test_numeric_looking_names_survive_save(tmp_path):
+def test_condition_ids_stay_text_and_reload_picks_up_changes(tmp_path):
     df = synthetic(n_groups=2)
     df["group"] = np.where(df["group"].str.contains("pH5"), "01", "002")
-    p = _write(df, tmp_path / "n.csv")
-    pr = Project.from_csv([p])
-    assert set(pr.groups) == {"01", "002"}
-    pr.conditions.add_condition(ConditionDef("pH", "numeric"))
-    pr.conditions.set_value("01", "pH", "5")
-    pr.save(tmp_path / "n.dmap")
-    back = Project.load(tmp_path / "n.dmap")
-    assert set(back.groups) == {"01", "002"} and back.conditions.value("01", "pH") == "5"
+    folder = make_folder(tmp_path, {"A": df}, ph=False)
+    pr = Project.open_folder(folder)
+    assert set(pr.groups) == {"A · 01", "A · 002"}
+    bf, _ = read_batch_file(folder / "A.xlsx")
+    r = list(bf.conditions.text(COND_ID)).index("01")
+    bf.conditions.set_value(r, "pH", "5")
+    bf.set_item("정제일", "2026-10-01")
+    import os, time
+    write_batch_file(bf, folder / "A.xlsx")
+    os.utime(folder / "A.xlsx", (time.time() + 5, time.time() + 5))
+    pr.reload()
+    assert pr.conditions.value("A · 01", "pH") == "5" and pr.batches.table.value("A", "정제일") == "2026-10-01"
 
 
 def test_failed_save_keeps_previous_file(tmp_path, project):
     path = tmp_path / "keep.dmap"
     project.save(path)
     before = path.read_bytes()
-    project.ui = {"bad": object()}        # serialisable via the fallback, so force a real failure:
-    project.particles = None
+    project.roles = None                   # force a real failure
     with pytest.raises(Exception):
         project.save(path)
     assert path.read_bytes() == before and not (tmp_path / "keep.dmap.saving").exists()
@@ -212,11 +227,8 @@ def test_classify_imagej_results(tmp_path):
 def test_map_can_leave_out_measurements_and_condition_values(tmp_path):
     from droplet_map.core.analysis import map_matrix, map_rows, particle_map
     df = synthetic(n_groups=4)
-    pr = Project.from_csv([_write(df, tmp_path / "a.csv")])
-    pr.conditions.add_condition(ConditionDef("pH", "numeric"))
-    for g in pr.groups:
-        if "pH5" in g:
-            pr.conditions.set_value(g, "pH", "5")
+    df["group"] = df["group"].str.replace(r" pH([678])", r" x\1", regex=True)   # pH recorded for pH5 groups only
+    pr = Project.open_folder(make_folder(tmp_path, {"A": df}))
     s = pr.settings
     s.map_skip_features = ["circularity"]
     s.map_skip_values = {"pH": [""]}            # groups without a recorded pH
@@ -236,44 +248,47 @@ def _two_batches(tmp_path):
     """Batch A and batch B with the same pH conditions; batch B's particles partition 1.5x more."""
     a = synthetic(n_groups=4)
     b = synthetic(n_groups=4, seed=1)
-    b["group"] = "B " + b["group"]
     b["CH1_partition"] *= 1.5
-    pa, pb = _write(a, tmp_path / "a.csv"), _write(b, tmp_path / "b.csv")
-    pr = Project.from_csv([pa], batch="A")
-    pr.add_csv([pb], batch="B")
-    pr.conditions.add_condition(ConditionDef("pH", "numeric"))
-    for g in pr.groups:
-        pr.conditions.set_value(g, "pH", g.split("pH")[1])
-    return pr
+    return Project.open_folder(make_folder(tmp_path, {"A": a, "B": b}, items={"B": {"정제일": "2026-10-01"}}))
 
 
 def test_batches_membership_view_and_save(tmp_path):
     pr = _two_batches(tmp_path)
     assert pr.batches.names() == ["A", "B"]
     assert {pr.batch_of(g) for g in pr.groups if g.startswith("B ")} == {"B"}
-    pr.batches.table.add_condition(ConditionDef("정제일", "categorical"))
-    pr.batches.table.set_value("B", "정제일", "2026-10-01")
     v = pr.view
     assert v.names()[:2] == ["배치", "배치: 정제일"] and "pH" in v.names()
     g = next(g for g in pr.groups if g.startswith("B "))
     assert v.value(g, "배치: 정제일") == "2026-10-01" and v.value(g, "배치") == "B"
+    pr.batches.references = {"A"}
     pr.save(tmp_path / "b.dmap")
     back = Project.load(tmp_path / "b.dmap")
-    assert back.batches.of == pr.batches.of and back.batches.table.value("B", "정제일") == "2026-10-01"
+    assert back.batches.of == pr.batches.of and back.batches.references == {"A"}
 
 
-def test_old_batch_condition_becomes_batch(tmp_path, project):
-    project.conditions.add_condition(ConditionDef("정제 배치", "categorical"))
-    for g in project.groups:
-        project.conditions.set_value(g, "정제 배치", "X1")
-    project.save(tmp_path / "old.dmap")
-    import zipfile
-    with zipfile.ZipFile(tmp_path / "old.dmap") as z, zipfile.ZipFile(tmp_path / "v1.dmap", "w") as out:
-        for n in z.namelist():
-            if n != "batches.json":
-                out.writestr(n, z.read(n))
+def test_old_projects_open_as_batch_files(tmp_path):
+    import json, zipfile
+    df = synthetic(n_groups=4)
+    groups = list(pd.unique(df["group"]))
+    cond = ConditionTable(groups, [ConditionDef("정제 배치", "categorical"), ConditionDef("NaCl (mM)", "numeric")])
+    for g in groups:
+        cond.set_value(g, "정제 배치", "X1")
+        cond.set_value(g, "NaCl (mM)", "150")
+    from droplet_map.core.io import guess_roles
+    with zipfile.ZipFile(tmp_path / "v1.dmap", "w") as z:          # format 1: batch was a group condition
+        z.writestr("particles.csv", df.assign(source_file="a.csv").to_csv(index=False))
+        z.writestr("roles.json", json.dumps(guess_roles(df).to_dict()))
+        z.writestr("conditions.json", cond.to_json())
+        z.writestr("settings.json", json.dumps(Settings().to_dict()))
     back = Project.load(tmp_path / "v1.dmap")
     assert back.batches.names() == ["X1"] and "정제 배치" not in back.conditions.names() and back.notes
+    assert back.conditions.get("NaCl").unit == "mM" and len(back.particles) == len(df) and back.folder is None
+    with pytest.raises(ValueError):
+        back.save(tmp_path / "x.dmap")                          # data must go to a folder first
+    files = back.export_batch_files(tmp_path / "out")
+    back.save(tmp_path / "x.dmap")
+    again = Project.load(tmp_path / "x.dmap")
+    assert len(files) == 1 and len(again.particles) == len(df) and (tmp_path / "out" / "_템플릿.xlsx").exists()
 
 
 def test_condition_effect_is_judged_within_batches(tmp_path):
@@ -304,8 +319,8 @@ def test_batch_comparison_and_reference_batch_score(tmp_path):
     assert summ.at["A", "평균 score"] == pytest.approx(100) and summ.at["B", "평균 score"] < 100
 
 
-def test_delivery_summary(tmp_path):
-    from droplet_map.core.delivery import fill_delivery_from_names
+def test_delivery_summary_goes_to_a_sheet(tmp_path):
+    from droplet_map.core.importing import add_delivery, read_delivery_files
     from droplet_map.core.io import classify_file
     rows = []
     for t in (0, 10):
@@ -317,20 +332,25 @@ def test_delivery_summary(tmp_path):
     f = tmp_path / "deliv.csv"
     pd.DataFrame(rows).to_csv(f, index=False)
     assert classify_file(f) == "delivery"
-    pr = Project.from_csv([_write(synthetic(n_groups=2), tmp_path / "a.csv")], batch="A")
-    pr.add_delivery([f], batch="A")
-    d = pr.delivery
-    assert len(d.groups()) == 2 and d.channels() == ["CH1_Mean", "CH2_Mean"]
-    assert d.ratio()["CH1_Mean"].round(3).tolist() == [0.1, 0.1]
-    assert fill_delivery_from_names(d.conditions) == ["AHP-r568", "FITC-PRD", "PEG", "시간"]
-    d.uses[d.groups()[0]] = pr.groups[0]
-    pr.save(tmp_path / "d.dmap")
-    back = Project.load(tmp_path / "d.dmap")
-    assert back.delivery.uses == d.uses and back.delivery.conditions.value(d.groups()[1], "시간") == "10"
-    assert all(back.batch_of(g) == "A" for g in back.all_groups())
+    d, _ = read_delivery_files([f])
+    assert d.channels() == ["CH1_Mean", "CH2_Mean"]
+    folder = make_folder(tmp_path, {"A": synthetic(n_groups=2)})
+    bf, _ = read_batch_file(folder / "A.xlsx")
+    cid = bf.condition_ids()[0]
+    notes = add_delivery(bf, "세포 전달", d, {g: cid for g in d.groups()}, sub_from_names=True)
+    s = bf.sheet("세포 전달")
+    assert "2행" in notes[0] and s.column("시간").role == "하위 조건"
+    assert list(s.numeric("세포질/입자 CH1_Mean").round(3)) == [0.1, 0.1]
+    write_batch_file(bf)
+    pr = Project.open_folder(folder)
+    ms = pr.measure_set("세포 전달")
+    assert ms is not None and "시간" in ms.subs and len(ms.measures) == 2
+    assert all(ms.formation_of[g] == f"A · {cid}" for g in ms.measures.index)
+    desc = pr.batch_descriptors()
+    assert "세포 전달" in desc.categories()
 
 
-# ---------------------------------------------------------------- batch map (0.4)
+# ---------------------------------------------------------------- batch map
 def test_batch_descriptors_trends_matched_and_direct():
     from droplet_map.demo import demo_project
     from droplet_map.core.batch_map import KIND_TREND, KIND_MATCHED, KIND_DIRECT, batch_distance_map, batch_scores
@@ -344,7 +364,10 @@ def test_batch_descriptors_trends_matched_and_direct():
     assert d.values.at["B01", "circularity / pH"] > d.values.at["B05", "circularity / pH"]
     # dates typed as text count as days
     assert d.meta.at["정제일", "type"] == "numeric" and d.values.at["B05", "정제일"] > 100
-    assert d.meta.at["제타 포텐셜", "category"] == "in vitro 관측"
+    assert d.meta.at["제타 포텐셜", "category"] == "배치 성질"
+    # every per-condition sheet is its own category; FRAP gets a pH trend, delivery a time trend
+    assert {"입자 형태", "in vitro 실험", "세포 전달"} <= set(d.categories())
+    assert pd.notna(d.values.at["B01", "FRAP 회복률 / pH"]) and pd.notna(d.values.at["B01", "세포질/입자 항체 신호 / 시간"])
     bm = batch_distance_map(d)
     D = bm.distance
     assert D.at["B01", "B02"] < D.at["B01", "B05"]
@@ -354,20 +377,19 @@ def test_batch_descriptors_trends_matched_and_direct():
     s = batch_scores(bm, "B01")
     assert s["B01"] == 100 and s["B02"] > s["B05"]
     # category weight 0 and skipped parts change the map
-    only_purif = batch_distance_map(d, weights={"in vitro 관측": 0, "세포 전달": 0})
+    only_purif = batch_distance_map(d, weights={c: 0 for c in d.categories() if c != "정제 조건"})
     assert set(only_purif.by_category) == {"정제 조건"}
-    no_trend = batch_distance_map(d, skip={"입자 · 경향"})
-    assert not any("/ pH" in it for it in no_trend.used)
+    no_trend = batch_distance_map(d, skip={"입자 형태 · 경향"})
+    assert not any(it.startswith("circularity / ") for it in no_trend.used)
 
 
-def test_batch_categories_save_and_one_batch(tmp_path):
+def test_new_category_from_a_batch_item_and_one_batch(tmp_path):
     from droplet_map.core.batch_map import batch_distance_map
-    pr = Project.from_csv([_write(synthetic(n_groups=4), tmp_path / "a.csv")], batch="A")
-    pr.batches.add_category("안정성")
-    pr.batches.table.add_condition(ConditionDef("응집 시작 (일)", "numeric"))
-    pr.batches.set_category("응집 시작 (일)", "안정성")
-    pr.save(tmp_path / "p.dmap")
-    q = Project.load(tmp_path / "p.dmap")
-    assert "안정성" in q.batches.categories and q.batches.category("응집 시작 (일)") == "안정성"
+    folder = make_folder(tmp_path, {"A": synthetic(n_groups=4)})
+    bf, _ = read_batch_file(folder / "A.xlsx")
+    bf.set_item("응집 시작", 12, "일", "안정성")
+    write_batch_file(bf)
+    q = Project.open_folder(folder)
+    assert "안정성" in q.batches.categories and q.batches.category("응집 시작") == "안정성"
     bm = batch_distance_map(q.batch_descriptors())
     assert bm.coords is None and list(bm.distance.index) == ["A"]
