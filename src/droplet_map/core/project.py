@@ -366,7 +366,7 @@ def batchset_from_legacy(particles: pd.DataFrame, cond: ConditionTable, batches:
                 ds.append_frame(body.reset_index(drop=True))
                 if body[COND_ID].isna().any():
                     bs.notes.append(f"{b}: 세포 전달 행에 어떤 형성 조건의 입자를 썼는지 기록이 없어 조건 ID가 비어 있습니다. "
-                                    "배치 노트의 '세포 전달' 시트에서 조건 ID를 넣으면 분석에 들어갑니다.")
+                                    "배치 파일의 '세포 전달' 시트에서 조건 ID를 넣으면 분석에 들어갑니다.")
         bf.fill_ratios()
         bs.files[b] = bf
     return bs

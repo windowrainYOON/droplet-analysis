@@ -64,6 +64,26 @@ CYTO_PREFIX = "세포질 "
 INSIDE_PREFIX = "입자 안 "
 
 _HEADER = re.compile(r"^\s*(.*?)\s*\(([^()]*)\)\s*$")
+_ROLE_TAG = re.compile(r"^(.*?)\s*\[([^\[\]]+)\]\s*$")
+GUIDE_SHEET = "_사용법"
+GUIDE = (
+    "이 파일 = 정제 배치 하나. Droplet Map이 폴더의 배치 파일을 읽고, 엑셀에서 저장하면 바로 다시 읽습니다.",
+    "",
+    "시트",
+    "• 배치 정보: 항목 · 값 · 단위 · 구분 · 메모. 배치마다 값이 하나인 것 (정제일, 컬럼, 제타 포텐셜 …). '구분'이 배치 지도의 범주입니다 (정제 조건, 배치 성질, 새 이름도 됨).",
+    "• 형성 조건: 입자 형성 조건 하나에 한 행. 조건 ID(C01, C02 …)는 다른 시트와 이어 주는 열이라 꼭 채웁니다.",
+    "• 입자 형태: 이미지 분석의 입자 하나에 한 행 (조건 ID, 이미지, 측정값 …). 입자 CSV는 Droplet Map의 '데이터 › CSV를 배치 파일에 넣기'로 넣을 수 있습니다.",
+    "• in vitro 실험, 세포 전달: 조건 ID마다 한 행 이상 (반복 측정). 세포질/입자 칸이 비어 있으면 세포질 · 입자 안 값으로 계산합니다.",
+    "• 시트를 새로 만들어도 됩니다: 첫 행에 '조건 ID' 열이 있으면 조건별 측정 시트로 읽고, 시트 이름이 범주가 됩니다.",
+    "",
+    "열",
+    "• 첫 행이 열 이름입니다. 단위는 괄호에: NaCl (mM). 열을 더하고 지우고 이름을 바꿔도 됩니다.",
+    "• 역할은 이름과 값으로 짐작합니다: 숫자 = 측정값, 시간 · 항체 · 농도 = 하위 조건, 반복 · 이미지 = 반복, 메모 · 비고 = 메모 (분석에 안 씀). 형성 조건 시트의 열은 모두 조건입니다.",
+    "• 역할을 직접 정하려면 이름 뒤에 대괄호로: 처리량 (µg) [하위 조건], 배양 조건 [메모]. 쓸 수 있는 역할: 측정값, 하위 조건, 반복, 메모, 조건.",
+    "",
+    "값",
+    "• 빈칸 = 기록 안 함 (0으로 읽지 않습니다). '_'로 시작하는 시트(이 시트, 숨은 _droplet)는 데이터로 읽지 않습니다.",
+)
 
 
 def split_header(text) -> tuple[str, str]:
@@ -572,6 +592,12 @@ def read_batch_file(path) -> tuple[BatchFile, list[str]]:
         headers = [str(header[i]).strip() for i in keep]
         if not headers:
             continue
+        tags = {}
+        for j, h in enumerate(headers):          # "시간 (min) [하위 조건]": the role written in the header
+            m = _ROLE_TAG.match(h)
+            if m and m.group(2).strip() in ROLES:
+                headers[j] = m.group(1).strip()
+                tags[split_header(headers[j])[0]] = m.group(2).strip()
         body = []
         for r in rows:
             r = list(r) + [None] * (len(header) - len(r))
@@ -598,7 +624,7 @@ def read_batch_file(path) -> tuple[BatchFile, list[str]]:
                 if n in seen:
                     continue
                 seen.add(n)
-                role = meta_cols.get((ws_name, n))
+                role = tags.get(n) or meta_cols.get((ws_name, n))
                 if role not in ROLES_FOR[kind]:
                     role = _guess_role(kind, n, df[n] if n in df else [])
                 cols.append(Column(n, u, role))
@@ -681,6 +707,10 @@ def write_batch_file(bf: BatchFile, path=None):
         for row in arr:
             ws.append([_out(v, roles[i] if s.kind != KIND_BATCH else (ROLE_VALUE if i == 1 else ROLE_NOTE))
                        for i, v in enumerate(row)])
+    guide = wb.create_sheet(GUIDE_SHEET)
+    guide.column_dimensions["A"].width = 140
+    for line in GUIDE:
+        guide.append([line])
     meta = wb.create_sheet(META_SHEET)
     meta.sheet_state = "hidden"
     meta.append(["시트", "열", "모양 / 역할", "범주", "단위"])

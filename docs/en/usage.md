@@ -1,6 +1,6 @@
-# Droplet Map usage (0.5)
+# Droplet Map usage (0.5.1)
 
-From 0.5 **data entry and analysis are separate.** Batch information and experiment data live in **one Excel workbook per purification batch** (a batch file); Droplet Map reads the **batch folder** holding those files and only analyses. Batch files are edited in the in-app **batch note** window or in Excel; on save Droplet Map reads them again.
+From 0.5 **data entry and analysis are separate.** Batch information and experiment data live in **one Excel workbook per purification batch** (a batch file); Droplet Map reads the **batch folder** holding those files and only analyses. Batch files are edited **in Excel**; on save Droplet Map reads them again. The app makes a new batch file with the default sheets and parameters and opens it in Excel; after that it only views and analyses.
 
 ## Batch files (one batch = one .xlsx)
 Five default sheets; sheets, columns and items can all be added, changed and removed. A "condition" is a particle formation condition, and every sheet links to the condition table by **조건 ID** (condition ID).
@@ -14,7 +14,7 @@ Five default sheets; sheets, columns and items can all be added, changed and rem
 | 세포 전달 | per condition | one row per delivery run: time and antibody dose (sub-conditions), cytoplasm / inside-particle signal, ratio (filled when blank) |
 
 - Headers are `name (unit)`. Column roles: condition · measurement · sub-condition (time, dose) · replicate · note.
-- Sheet shapes, categories and roles are kept in a hidden `_droplet` sheet; without it (a file made in Excel) they are guessed from names.
+- Sheet shapes, categories and roles are kept in a hidden `_droplet` sheet; columns added in Excel get a role guessed from name and values, or the one written at the end of the header (`time (min) [하위 조건]`). A new sheet with a 조건 ID column is read as a per-condition sheet (its name = category). Each file has a `_사용법` guide sheet.
 - Blanks are "not recorded", never zero.
 - `_템플릿.xlsx` in the folder is the starting layout for new batches. Files starting with `_` or `~$` are not batches.
 
@@ -23,12 +23,11 @@ Five default sheets; sheets, columns and items can all be added, changed and rem
 - `File › Open demo (5 batches)`: a synthetic batch folder (made-up data).
 - Projects from before 0.5 (data inside the .dmap) still open; `File › Export as batch files` writes a batch folder to edit from then on.
 
-## Batch note (⌘E)
-- Left: batch files and the 📐 template. Center: one tab per sheet (edit like Excel, ⌘C / ⌘V tables from Excel, Delete clears). Right: sheet, column and row tools, CSV import, checks.
-- New batch from the template or as a copy of another batch (layout, conditions and batch values kept, measurements emptied).
-- CSV import: particle CSVs → the per-particle sheet, cell delivery summaries → the delivery sheet; each CSV group is assigned a condition ID. Group names are read only on the buttons "find from group names" (blanks only) and "make new conditions from names". Repeated data and files with mostly different measurements are refused.
-- Checks: duplicate or unknown condition IDs, non-numbers in measurement columns; cells are shown in red.
-- ⌘S saves, ⌘Z undoes. Changes saved from Excel are picked up automatically (changed files only).
+## Editing in Excel
+- `File › New batch` (⇧⌘N): name a batch, the app writes a file from the folder template (or a copy of another batch: layout, conditions and batch values kept, measurements emptied) and opens it in Excel.
+- `File › Open batch file in Excel` (each batch and the template); saving in Excel is picked up within a couple of seconds (changed files only).
+- `File › Check batch files`: duplicate / unknown condition IDs, text in number columns, with sheet and Excel row.
+- Image-analysis CSVs: `Data › Put CSVs into a batch file` (or drop them): pick the batch, assign each CSV group a condition ID (group names read only on the buttons); repeated data are skipped. Close that file in Excel meanwhile.
 
 ## Droplet Map
 - **Left – batches › formation conditions**; **center**: Batch map · Batch table (read-only) · Batch comparison · Data; **particle level** (closed at start): Particle map · Condition comparison · Reference score · Measurement sheets; **right**: settings and measurement weights.

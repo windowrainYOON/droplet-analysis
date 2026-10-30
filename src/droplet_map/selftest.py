@@ -55,7 +55,7 @@ def run() -> int:
     QtWidgets.QMessageBox.warning = staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Ok)
     QtWidgets.QMessageBox.question = staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Yes)
     QtWidgets.QMessageBox.exec = lambda self: 0
-    from .gui import batch_note
+    from .gui import batch_files
     from .core.project import Project
     from .core.batchfile import TEMPLATE_NAME, read_batch_file, template, write_batch_file
 
@@ -71,7 +71,23 @@ def run() -> int:
             dlg.suggest()
             dlg.make_from_names()
         return 1
-    batch_note.ImportDialog.exec = auto_import
+    batch_files.ImportDialog.exec = auto_import
+    opened = []
+    batch_files.open_in_excel = lambda path: opened.append(Path(path))
+    ask = {"name": "", "copy": None, "batch": ""}
+
+    def new_batch_dialog(dlg):
+        dlg.name.setText(ask["name"])
+        dlg.src.setCurrentIndex(0 if ask["copy"] is None else
+                                next(i for i in range(dlg.src.count()) if dlg.src.itemData(i) == ask["copy"]))
+        return 1
+    batch_files.NewBatchDialog.exec = new_batch_dialog
+    QtWidgets.QInputDialog.getItem = staticmethod(
+        lambda parent, title, label, items, *a, **k: (next(i for i in items if i.startswith(ask["batch"])), True))
+    from .core.batchset import load_folder
+
+    def batch(name):
+        return load_folder(folder).files[name]
 
     def settle(w, ms=3000):
         """Let the folder watcher and the reload timer run."""
@@ -84,22 +100,28 @@ def run() -> int:
 
     csv = tmp / "particles.csv"
     synthetic().to_csv(csv, index=False)
-    folder = tmp / "배치 노트"
+    folder = tmp / "배치 파일"
     folder.mkdir()
     write_batch_file(template(), folder / TEMPLATE_NAME)
     w = MainWindow(); w.dirty = False
     w.show()
-    w.open_folder(folder)                       # no batch files yet: the batch note opens
-    note = w.note_window
-    check("빈 배치 폴더 → 배치 노트 열림", note is not None and note.isVisible() and w.project is not None)
-    a = note.create_batch("A")
-    check("새 배치 (템플릿에서)", a is not None and (folder / "A.xlsx").exists()
-          and [s.name for s in a.bf.sheets][:3] == ["배치 정보", "형성 조건", "입자 형태"])
-    note.import_csvs([str(csv)])
-    check("입자 CSV → 입자 시트 (그룹 이름에서 조건 만들기, 누를 때만)", len(a.bf.particles.data) == len(synthetic())
-          and len(a.bf.condition_ids()) == 8 and a.dirty)
-    note.save(); settle(w)
+    ask["name"] = "A"
+    w.open_folder(folder)                       # no batch files yet: asks, makes the first one and opens it in Excel
+    settle(w)
+    import openpyxl
+    wb = openpyxl.load_workbook(folder / "A.xlsx")
+    check("빈 배치 폴더 → 새 배치 파일 (기본 시트 · 파라미터 틀) 만들어 엑셀로 열기",
+          opened == [folder / "A.xlsx"] and wb.sheetnames[:5] == ["배치 정보", "형성 조건", "입자 형태", "in vitro 실험", "세포 전달"]
+          and "_사용법" in wb.sheetnames and [c.value for c in wb["형성 조건"][1]][:3] == ["조건 ID", "pH", "NaCl (mM)"]
+          and "A" in w.project.batches.names())
+    ask["batch"] = "A"
+    w.import_csvs([str(csv)]); settle(w)
+    a = batch("A")
+    check("입자 CSV → 배치 파일의 입자 시트 (그룹 이름에서 조건 만들기, 누를 때만)", len(a.particles.data) == len(synthetic())
+          and len(a.condition_ids()) == 8)
     pr = w.project
+    check("파일이 바뀌면 Droplet Map이 다시 읽음", len(pr.groups) == 8 and len(pr.particles) == len(synthetic()),
+          f"조건 {len(pr.groups)}개 · 입자 {len(pr.particles):,}개")
     check("저장 → Droplet Map이 다시 읽음", len(pr.groups) == 8 and len(pr.particles) == len(synthetic()),
           f"조건 {len(pr.groups)}개 · 입자 {len(pr.particles):,}개")
     g2 = pr.groups[2]
@@ -176,11 +198,11 @@ def run() -> int:
     extra = synthetic(n_groups=2, seed=1).drop(columns=["CH1_partition"])
     extra["group"] = "EXTRA, " + extra["group"]
     b = tmp / "extra.csv"; extra.to_csv(b, index=False)
-    n0 = len(a.bf.particles.data)
-    note.import_csvs([str(b), str(csv)])
-    n1 = len(a.bf.particles.data)
+    n0 = len(a.particles.data)
+    w.import_csvs([str(b), str(csv)]); settle(w)
+    a = batch("A")
+    n1 = len(a.particles.data)
     check("여러 CSV 넣기 (같은 데이터는 건너뜀)", n1 == n0 + len(extra), f"{n0:,} → {n1:,}")
-    note.save(); settle(w)
     check("입자 데이터가 바뀌면 분석 결과는 버림", w.result is None and len(w.project.particles) == n1)
     w.run_analysis(); ok = wait(w)
     kept = {s.split(": ")[-1] for s in w.result.prepared.data["source_file"]} if ok and w.result else set()
@@ -191,13 +213,16 @@ def run() -> int:
     bb["group"] = bb["group"].str.replace("TEST,", "TEST-B,", regex=False)
     bb["CH1_partition"] *= 1.6
     bcsv = tmp / "batch_b.csv"; bb.to_csv(bcsv, index=False)
-    n_cond = len(a.bf.condition_ids())        # the EXTRA groups have the same values as existing conditions
-    bn = note.create_batch("B", folder / "A.xlsx")
-    check("새 배치 (이전 배치 복사: 형성 조건 유지, 측정값 비움)", bn is not None and n_cond == 8 and len(bn.bf.condition_ids()) == n_cond
-          and len(bn.bf.particles.data) == 0)
-    note.import_csvs([str(bcsv)])
-    check("CSV 그룹 → 같은 값의 조건 찾기", len(bn.bf.condition_ids()) == n_cond and len(bn.bf.particles.data) == len(bb))
-    note.save(); settle(w)
+    n_cond = len(a.condition_ids())        # the EXTRA groups have the same values as existing conditions
+    ask.update(name="B", copy=folder / "A.xlsx")
+    w.new_batch(); settle(w)
+    bn = batch("B")
+    check("새 배치 (이전 배치 복사: 형성 조건 유지, 측정값 비움)", opened[-1] == folder / "B.xlsx" and n_cond == 8
+          and len(bn.condition_ids()) == n_cond and len(bn.particles.data) == 0)
+    ask["batch"] = "B"
+    w.import_csvs([str(bcsv)]); settle(w)
+    bn = batch("B")
+    check("CSV 그룹 → 같은 값의 조건 찾기", len(bn.condition_ids()) == n_cond and len(bn.particles.data) == len(bb))
     pr = w.project
     bgroups = [g for g in pr.groups if pr.batch_of(g) == "B" and g in set(pr.particles["group"])]
     check("배치 = 배치 파일", pr.batches.names()[:2] == ["A", "B"] and len(bgroups) == 8 and pr.view.names()[0] == "배치",
@@ -236,14 +261,12 @@ def run() -> int:
                 rows.append({"group": g, "region": region, "n_images": 3, "parameter": par, "n": 10,
                              "mean": base * (1 + t / 10), "sd": base / 10, "min": 0.0, "max": base * 3})
     dcsv = tmp / "particle_intensity_summary_group.csv"; pd.DataFrame(rows).to_csv(dcsv, index=False)
-    note.files.setCurrentRow(0); app.processEvents()
-    a = note.cur
-    note.import_csvs([str(dcsv)])
-    dl = a.bf.sheet("세포 전달")
+    ask["batch"] = "A"
+    keep = w.result
+    w.import_csvs([str(dcsv)]); settle(w)
+    dl = batch("A").sheet("세포 전달")
     check("세포 전달 CSV → 세포 전달 시트 (시간은 하위 조건)", len(dl.data) == 2 and dl.has("시간")
           and sorted(dl.numeric("시간").dropna()) == [0, 10], f"{len(dl.data)}행")
-    note.save(); settle(w)
-    keep = w.result
     check("입자 데이터가 같으면 분석 결과 유지", keep is not None and w.result is keep)
     w._set_tab_open(w.measure_page, True)
     dp = w.measure_page
@@ -254,23 +277,29 @@ def run() -> int:
                                              for j in range(dp.link.columnCount()))
     check("측정 시트 그림 + 그 조건의 입자와 나란히", bool(dp.plot.fig.axes) and linked)
 
-    # batch note editing: a cell, undo, a new column; then a change made outside (Excel)
-    note.tabs.setCurrentIndex(0)
-    m = note.model()
-    ix = m.index(0, 1)
-    m.setData(ix, "A-정제-1")
-    edited = a.bf.item("배치 이름") == "A-정제-1"
-    note.do_undo()
-    check("배치 노트: 칸 고치기 · 실행 취소", edited and a.bf.item("배치 이름") == "A")
-    note.tabs.setCurrentIndex(1)
-    from .core.batchfile import Column
-    note.before_edit(); note.sheet().add_column(Column("완충액", "", "조건")); note.after_edit()
-    note.tabs.setCurrentIndex(1)
-    note.view().setCurrentIndex(note.model().index(0, note.sheet().names().index("완충액")))
-    note.paste_cells("HEPES\nHEPES\nTris")
-    check("배치 노트: 열 추가 · 붙여넣기", list(note.sheet().data["완충액"].iloc[:3]) == ["HEPES", "HEPES", "Tris"])
-    note.save(); settle(w)
-    check("형성 조건 추가 → 분석 조건에 반영", "완충액" in w.project.conditions.names())
+    # edits made in Excel: a new condition column, a new sheet with a role written in a header
+    wb = openpyxl.load_workbook(folder / "A.xlsx")
+    ws = wb["형성 조건"]
+    col = ws.max_column + 1
+    ws.cell(1, col, "완충액")
+    for r, v in ((2, "HEPES"), (3, "HEPES"), (4, "Tris")):
+        ws.cell(r, col, v)
+    dls = wb.create_sheet("DLS", 5)
+    dls.append(["조건 ID", "반복", "크기 (nm)", "측정 온도 (°C) [하위 조건]"])
+    for i, cid in enumerate(["C01", "C02", "C03"]):
+        dls.append([cid, 1, 100 + 20 * i, 25])
+    wb.save(folder / "A.xlsx")
+    settle(w, 6000)
+    ds = w.project.measure_set("DLS")
+    check("엑셀에서 형성 조건 · 시트 추가 → 다시 읽어 반영", "완충액" in w.project.conditions.names()
+          and ds is not None and ds.subs == ["측정 온도"] and ds.values == ["크기"])
+    w.show_issues(); app.processEvents()
+    txt = w._issues_dialog.findChild(QtWidgets.QPlainTextEdit).toPlainText()
+    w._issues_dialog.close()
+    check("배치 파일 점검", "A.xlsx (A): 고칠 곳 없음" in txt and "B.xlsx" in txt, txt.splitlines()[0][:60])
+    w._fill_excel_menu()
+    labels = [x.text() for x in w.excel_menu.actions()]
+    check("배치 파일 엑셀에서 열기 메뉴", labels[:2] == ["A", "B"] and labels[-1].startswith("📐"))
     bf, _ = read_batch_file(folder / "B.xlsx")
     bf.set_item("제타 포텐셜", -21.5, "mV", "배치 성질")
     write_batch_file(bf, folder / "B.xlsx")
@@ -296,7 +325,6 @@ def run() -> int:
     w.project.path = tmp / "no_such_dir" / "x.dmap"
     check("저장 실패 시 오류 표시 (앱 계속 동작)", w.save() is False and w.dirty)
     w.dirty = False
-    note.close()
     batch_level(w, check, wait, app, tmp, settle)
     w.dirty = False
     w.close()

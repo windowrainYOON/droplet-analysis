@@ -22,7 +22,7 @@ KIND_HELP = {
 
 class BatchTablePage(QtCore.QObject):
     kinds_changed = QtCore.Signal()    # which computed items are made
-    edit_requested = QtCore.Signal()   # open the batch note
+    edit_requested = QtCore.Signal()   # open a batch file in Excel
     title = "배치 표"
 
     def __init__(self, parent=None):
@@ -40,7 +40,7 @@ class BatchTablePage(QtCore.QObject):
         self.table.setAlternatingRowColors(True)
         self.table.setWordWrap(True)
         top = QtWidgets.QWidget(); tl = QtWidgets.QVBoxLayout(top); tl.setContentsMargins(0, 0, 0, 0)
-        tl.addWidget(QtWidgets.QLabel("<b>배치 파일의 배치 값</b> (열 머리 = [범주] 항목, 고치는 곳은 배치 노트)"))
+        tl.addWidget(QtWidgets.QLabel("<b>배치 파일의 배치 값</b> (열 머리 = [범주] 항목, 고치는 곳은 엑셀)"))
         tl.addWidget(self.table, 1)
         split.addWidget(top)
 
@@ -70,9 +70,9 @@ class BatchTablePage(QtCore.QObject):
         lay.addWidget(split, 1)
 
         edit = section("배치 값 고치기",
-                       info_label("배치 값과 범주(구분)는 배치 파일에서 고칩니다. 저장하면 여기에 바로 다시 읽힙니다. "
+                       info_label("배치 값과 범주(구분)는 배치 파일(엑셀)에서 고칩니다. 엑셀에서 저장하면 여기에 바로 다시 읽힙니다. "
                                   "★ 기준 배치는 왼쪽 목록에서 고릅니다."),
-                       flow_buttons((("배치 노트에서 편집…", self.edit_requested.emit),)))
+                       flow_buttons((("엑셀에서 열기…", self.edit_requested.emit),)))
         self.kind_checks = {}
         self.kinds_w = QtWidgets.QWidget(); self.kinds_lay = QtWidgets.QVBoxLayout(self.kinds_w)
         self.kinds_lay.setContentsMargins(0, 0, 0, 0)

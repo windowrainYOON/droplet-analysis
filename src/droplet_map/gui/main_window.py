@@ -1,8 +1,8 @@
 """Main window: left batch › formation condition list · center views · right settings tabs, one menu
 per feature, work log and background workers.
 
-Data come from a folder of batch files (one Excel workbook per batch), edited in the batch note
-window or in Excel; the folder is watched and read again when a file changes. Main flow: 배치 지도 ·
+Data come from a folder of batch files (one Excel workbook per batch), edited in Excel (the app
+makes new batch files from the template and opens them there); the folder is watched and read again when a file changes. Main flow: 배치 지도 ·
 배치 표 · 배치 비교 (batch level). Particle level (입자 지도, 조건 비교, 기준 score, 측정 시트) opens
 from the 입자 수준 menu or from a batch on the map."""
 from __future__ import annotations
@@ -18,7 +18,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from .. import __version__
 from ..core.analysis import map_rows, particle_map, reference_score, run_all
 from ..core.batches import UNASSIGNED
-from ..core.batchfile import batch_paths
+from ..core.batchfile import TEMPLATE_NAME, batch_paths, template, write_batch_file
 from ..core.batchset import forget_cache
 from ..core.project import Project
 from .common import app_icon, save_figure_dialog, save_frame_dialog, set_group_names, warn
@@ -83,7 +83,6 @@ class MainWindow(QtWidgets.QMainWindow):
                       self.map_page, self.compare_page, self.score_page, self.measure_page]
         # particle level: closed until asked for (입자 수준 menu, or a batch on the batch map)
         self.particle_pages = [self.map_page, self.compare_page, self.score_page, self.measure_page]
-        self.note_window = None
 
         self.watcher = QtCore.QFileSystemWatcher(self)
         self.watcher.directoryChanged.connect(self._folder_touched)
@@ -136,7 +135,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.batch_map_page.settings_changed.connect(self._batch_map_settings_changed)
         self.batch_map_page.particle_map_requested.connect(self.open_batch_particles)
         self.batch_map_page.compare_requested.connect(self.open_batch_compare)
-        self.batch_table_page.edit_requested.connect(lambda: self.open_batch_note())
+        self.batch_table_page.edit_requested.connect(lambda: self.open_batch_in_excel())
         self.batch_table_page.kinds_changed.connect(self._batch_kinds_changed)
 
         self.progress = QtWidgets.QProgressBar(); self.progress.setRange(0, 0); self.progress.setMaximumWidth(160); self.progress.hide()
@@ -166,7 +165,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.recent_menu = f.addMenu("최근 연 폴더 · 프로젝트")
         self._fill_recent()
         f.addSeparator()
-        self.a_note = self._act(f, "배치 노트 열기 (배치 파일 편집)…", lambda: self.open_batch_note(), "Ctrl+E")
+        self.a_new_batch = self._act(f, "새 배치 (엑셀 파일 만들어 열기)…", self.new_batch, "Ctrl+Shift+N")
+        self.excel_menu = f.addMenu("배치 파일 엑셀에서 열기")
+        self.excel_menu.aboutToShow.connect(self._fill_excel_menu)
+        self.a_issues = self._act(f, "배치 파일 점검…", self.show_issues)
         self.a_reload = self._act(f, "배치 폴더 다시 읽기", self.reload_folder, "Ctrl+Shift+R")
         self.a_reveal = self._act(f, "배치 폴더 보기 (Finder)", self.reveal_folder)
         self.a_export_files = self._act(f, "배치 파일로 꺼내기 (예전 프로젝트)…", self.export_batch_files)
@@ -197,7 +199,7 @@ class MainWindow(QtWidgets.QMainWindow):
         btm = mb.addMenu("배치 표")
         self.tab_actions[self.batch_table_page] = self._act(btm, "배치 표 탭 열기", lambda on: self._set_tab_open(self.batch_table_page, on), checkable=True)
         btm.addSeparator()
-        self._act(btm, "배치 노트에서 편집…", lambda: self.open_batch_note())
+        self._act(btm, "배치 파일 엑셀에서 열기…", lambda: self.open_batch_in_excel())
         self._act(btm, "배치 표 저장 (배치 값 + 계산한 항목, CSV)…", self._save_batch_items)
 
         bm = mb.addMenu("배치 비교")
@@ -214,7 +216,7 @@ class MainWindow(QtWidgets.QMainWindow):
         dm = mb.addMenu("데이터")
         self.tab_actions[self.data_page] = self._act(dm, "데이터 탭 열기", lambda on: self._set_tab_open(self.data_page, on), checkable=True)
         dm.addSeparator()
-        self._act(dm, "입자 CSV · 세포 전달 CSV 넣기 (배치 노트)…", lambda: self.open_batch_note())
+        self._act(dm, "입자 CSV · 세포 전달 CSV를 배치 파일에 넣기…", lambda: self.import_csvs())
         dm.addSeparator()
         self.a_save_particles = self._act(dm, "입자 표 저장 (QC 통과 + 지도 좌표·군집, CSV)…", self._save_particles)
 
@@ -446,8 +448,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._restore_ui(project.ui)
         self._update_title()
         self._watch()
-        if self.note_window is not None:
-            self.note_window.set_folder(project.folder)
         self.batch_map_page.visible = self.groups_panel.visible_batches()
         self.batch_map_page.compute()
         if keep_result is not None:
@@ -491,25 +491,24 @@ class MainWindow(QtWidgets.QMainWindow):
         if not pr.source.files:
             self.log(f"배치 폴더 {folder.name}: 배치 파일이 아직 없습니다.")
             if QtWidgets.QMessageBox.question(
-                    self, "배치 폴더", f"'{folder.name}' 폴더에 배치 파일(.xlsx)이 없습니다.\n배치 노트를 열어 첫 배치를 만들까요?") \
+                    self, "배치 폴더", f"'{folder.name}' 폴더에 배치 파일(.xlsx)이 없습니다.\n첫 배치 파일을 만들어 엑셀로 열까요?") \
                     == QtWidgets.QMessageBox.Yes:
-                self.open_batch_note()
+                self.new_batch()
             return
         self._set_tab_open(self.batch_map_page, True)
         if pr.notes:
             self._show_notes(pr.notes)
 
     def new_folder(self):
-        """A new (empty) batch folder with the default template, then the batch note to fill it."""
+        """A new (empty) batch folder with the default template, then the first batch file."""
         if not self._confirm_discard():
             return
         base = QtWidgets.QFileDialog.getExistingDirectory(self, "새 배치 폴더를 만들 곳", str(Path.home() / "Documents"))
         if not base:
             return
-        name, ok = QtWidgets.QInputDialog.getText(self, "새 배치 폴더", "폴더 이름 (예: 단백질 이름):", text="배치 노트")
+        name, ok = QtWidgets.QInputDialog.getText(self, "새 배치 폴더", "폴더 이름 (예: 단백질 이름):", text="배치 파일")
         if not ok or not name.strip():
             return
-        from ..core.batchfile import TEMPLATE_NAME, template, write_batch_file
         folder = Path(base) / name.strip()
         folder.mkdir(parents=True, exist_ok=True)
         if not (folder / TEMPLATE_NAME).exists():
@@ -518,33 +517,108 @@ class MainWindow(QtWidgets.QMainWindow):
         self.set_project(Project.open_folder(folder))
         self._add_recent(folder)
         self.log(f"새 배치 폴더: {folder}")
-        self.open_batch_note(new_batch=True)
+        self.new_batch()
 
     def reveal_folder(self):
         if self._need_project() and self.project.folder is not None:
             QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(self.project.folder)))
 
-    def open_batch_note(self, new_batch=False, csv_paths=None):
-        """The batch note window: edits the batch files of the open folder."""
-        from .batch_note import BatchNoteWindow
-        if self.project is None or self.project.folder is None:
-            if self.project is not None and self.project.folder is None:
-                warn(self, "이 프로젝트는 아직 배치 파일이 없습니다. 먼저 '파일 › 배치 파일로 꺼내기'로 폴더에 쓰세요.")
-            else:
-                warn(self, "먼저 배치 폴더를 여세요 (파일 › 배치 폴더 열기, 또는 새 배치 폴더 만들기).")
-            return None
-        if self.note_window is None:
-            self.note_window = BatchNoteWindow()
-            self.note_window.saved.connect(self._note_saved)
-        self.note_window.set_folder(self.project.folder)
-        self.note_window.show(); self.note_window.raise_(); self.note_window.activateWindow()
-        if new_batch:
-            self.note_window.new_batch()
-        if csv_paths:
-            self.note_window.import_csvs(csv_paths)
-        return self.note_window
+    def _need_folder(self) -> bool:
+        if self.project is not None and self.project.folder is not None:
+            return True
+        if self.project is not None:
+            warn(self, "이 프로젝트는 아직 배치 파일이 없습니다. 먼저 '파일 › 배치 파일로 꺼내기'로 폴더에 쓰세요.")
+        else:
+            warn(self, "먼저 배치 폴더를 여세요 (파일 › 배치 폴더 열기, 또는 새 배치 폴더 만들기).")
+        return False
 
-    def _note_saved(self, path):
+    def new_batch(self):
+        """A batch file with the default sheets and parameters (folder template or a copy of another
+        batch), opened in Excel; the folder watcher reads it whenever Excel saves."""
+        if not self._need_folder():
+            return None
+        from .batch_files import NewBatchDialog, batch_choices, create_batch, open_in_excel
+        dlg = NewBatchDialog(self, batch_choices(self.project.folder))
+        if not dlg.exec():
+            return None
+        try:
+            path = create_batch(self.project.folder, dlg.name.text(), dlg.src.currentData())
+        except ValueError as e:
+            warn(self, str(e)); return None
+        self.log(f"새 배치 파일: {path.name} — 엑셀에서 채우고 저장하면 다시 읽습니다")
+        self._batch_file_written(path)
+        open_in_excel(path)
+        return path
+
+    def _fill_excel_menu(self):
+        m = self.excel_menu
+        m.clear()
+        if self.project is None or self.project.folder is None:
+            m.addAction("배치 폴더가 없습니다").setEnabled(False)
+            return
+        from .batch_files import open_in_excel
+        names = {f.path: n for n, f in self.project.source.files.items()}
+        for p in batch_paths(self.project.folder):
+            name = names.get(p, p.stem)
+            a = m.addAction(name if name == p.stem else f"{name}  ({p.name})")
+            a.triggered.connect(lambda _c=False, path=p: open_in_excel(path))
+        m.addSeparator()
+        a = m.addAction("📐 템플릿 (새 배치의 시작 모양)")
+        a.triggered.connect(lambda: open_in_excel(self._ensure_template()))
+
+    def _ensure_template(self) -> Path:
+        tpl = self.project.folder / TEMPLATE_NAME
+        if not tpl.exists():
+            write_batch_file(template(), tpl)
+        return tpl
+
+    def open_batch_in_excel(self, batch=None):
+        if not self._need_folder():
+            return
+        from .batch_files import open_in_excel
+        files = {n: f.path for n, f in self.project.source.files.items() if f.path is not None}
+        if not files:
+            if QtWidgets.QMessageBox.question(self, "배치 파일", "배치 파일이 없습니다. 새 배치를 만들까요?") == QtWidgets.QMessageBox.Yes:
+                self.new_batch()
+            return
+        if batch is None:
+            sel = [b for b in self.groups_panel.visible_batches() if b in files]
+            names = list(files)
+            batch, ok = QtWidgets.QInputDialog.getItem(self, "엑셀에서 열기", "배치:", names,
+                                                       names.index(sel[0]) if len(sel) == 1 else 0, False)
+            if not ok:
+                return
+        open_in_excel(files[batch])
+
+    def import_csvs(self, paths=None):
+        """Image-analysis CSVs into a batch file (CSV group -> condition ID), then read again."""
+        if not self._need_folder():
+            return
+        if not paths:
+            paths, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "입자 CSV · 세포 전달 요약 CSV", str(Path.home()),
+                                                              "CSV (*.csv *.txt *.tsv)")
+            if not paths:
+                return
+        from .batch_files import import_csvs
+        path = import_csvs(self, self.project.folder, [str(p) for p in paths])
+        if path is not None:
+            self.log(f"CSV {len(paths)}개를 {path.name}에 넣음: " + ", ".join(Path(p).name for p in paths))
+            self._batch_file_written(path)
+
+    def show_issues(self):
+        if not self._need_folder():
+            return
+        from .batch_files import issues_text
+        dlg = QtWidgets.QDialog(self); dlg.setWindowTitle("배치 파일 점검"); dlg.resize(720, 520)
+        lay = QtWidgets.QVBoxLayout(dlg)
+        t = QtWidgets.QPlainTextEdit(issues_text(self.project.folder)); t.setReadOnly(True)
+        lay.addWidget(t)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close); bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        self._issues_dialog = dlg
+        dlg.show()
+
+    def _batch_file_written(self, path):
         forget_cache(path)
         self.reload_timer.start(200)
 
@@ -664,7 +738,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def import_files(self, paths=None):
         """Dropped or chosen files: a folder or .xlsx opens its batch folder, a .dmap opens the project,
-        CSVs go into a batch file through the batch note."""
+        CSVs go into a batch file."""
         paths = [Path(p) for p in (paths or [])]
         dirs = [p for p in paths if p.is_dir()]
         dmaps = [p for p in paths if p.suffix.lower() == ".dmap"]
@@ -683,7 +757,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.project is None or self.project.folder is None:
                 warn(self, "CSV는 배치 파일에 넣어 씁니다. 먼저 배치 폴더를 열거나 만드세요 (파일 › 새 배치 폴더 만들기).")
             else:
-                self.open_batch_note(csv_paths=[str(p) for p in csvs])
+                self.import_csvs([str(p) for p in csvs])
         if other:
             warn(self, "무슨 파일인지 알 수 없어 건너뛰었습니다:\n" + "\n".join(p.name for p in other))
 
@@ -719,7 +793,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._add_recent(path)
         if pr.folder is None:
             pr.notes.append("예전 형식 프로젝트입니다 (데이터가 .dmap 안에 있음). 분석은 그대로 할 수 있고, "
-                            "'파일 › 배치 파일로 꺼내기'로 배치 파일 폴더를 만들면 배치 노트에서 고칠 수 있습니다.")
+                            "'파일 › 배치 파일로 꺼내기'로 배치 파일 폴더를 만들면 엑셀에서 고칠 수 있습니다.")
         if pr.notes:
             self._mark_dirty()
             self._show_notes(pr.notes)

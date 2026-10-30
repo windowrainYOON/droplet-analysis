@@ -134,6 +134,11 @@ def content_digest(df: pd.DataFrame) -> str:
     import hashlib
     cols = [c for c in df.columns if c != "source_file" and pd.api.types.is_numeric_dtype(df[c]) and df[c].notna().any()]
     num = df[sorted(cols)].astype("float64").reset_index(drop=True)   # same digest after concat / save
+    # 10 significant digits: Excel keeps about 15, so a value read back from a batch file still matches
+    arr = num.to_numpy()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mag = np.where(np.isfinite(arr) & (arr != 0), 10.0 ** (9 - np.floor(np.log10(np.abs(arr)))), 1.0)
+    num = pd.DataFrame(np.round(arr * mag) / mag, columns=num.columns)
     h = hashlib.sha1(",".join(num.columns).encode())
     h.update(pd.util.hash_pandas_object(num, index=False).to_numpy().tobytes())
     return h.hexdigest()

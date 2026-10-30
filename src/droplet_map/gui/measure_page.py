@@ -40,7 +40,7 @@ class MeasurePage(QtCore.QObject):
             w.currentIndexChanged.connect(self.redraw)
         view = section("보기", form([("시트", self.sheet), ("측정값", self.measure), ("가로축", self.xaxis)]),
                        info_label("점 = 반복 측정 하나, 선 = 배치별 중앙값. 가로축은 형성 조건(pH, NaCl …)이나 "
-                                  "그 시트의 하위 조건(시간 …)입니다. 값은 배치 노트에서 고칩니다."))
+                                  "그 시트의 하위 조건(시간 …)입니다. 값은 배치 파일(엑셀)에서 고칩니다."))
         self.panel = scroll_panel(view)
         self.plot.message("배치 파일에 조건별 측정 시트(FRAP, 세포 전달 …)가 있으면 여기에 나옵니다.")
 
