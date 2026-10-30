@@ -1,39 +1,42 @@
-# Droplet Map usage (0.4)
+# Droplet Map usage (0.5)
 
-From 0.4 the app centres on the **batch map**: each purification batch is one point, placed by its distance to the other batches over everything that describes it. The per-particle cluster map is the level below (particle level).
+From 0.5 **data entry and analysis are separate.** Batch information and experiment data live in **one Excel workbook per purification batch** (a batch file); Droplet Map reads the **batch folder** holding those files and only analyses. Batch files are edited in the in-app **batch note** window or in Excel; on save Droplet Map reads them again.
 
-## Layout and flow
-- **Left – batches › groups**: checked batches appear on the batch map. Expand a batch to see its particle-formation and cell-delivery groups; checked formation groups appear on the particle map. Right-click to set references (★).
-- **Center – main flow**: Batch map · Batch table · Batch comparison, plus the input tabs Group conditions · Data.
-- **Particle level** (sub-features): Particle map · Condition comparison · Reference score · Cell delivery. Closed at first; open them from the `입자 수준` menu, or double-click a batch on the batch map to open that batch's particle map.
-- **Right – settings** of the current tab, plus measurement weights (particle level).
-- `File › 가상 예제 프로젝트 열기 (배치 5개)` opens a synthetic five-batch project to try the batch level (made-up data).
+## Batch files (one batch = one .xlsx)
+Five default sheets; sheets, columns and items can all be added, changed and removed. A "condition" is a particle formation condition, and every sheet links to the condition table by **조건 ID** (condition ID).
 
-## What describes a batch (Batch table)
-Items are grouped in **categories**: 정제 조건 (purification), in vitro 관측, 세포 전달 by default; add more in the Batch table panel.
-- **Typed per batch**: one value per batch (purification date, protein concentration, column, zeta potential, antibody delivery efficiency …). Dates count as days.
-- **Computed from experiments** (particles → in vitro, delivery → cell delivery):
-  - **Trend (경향)**: within one batch, change of a measurement per unit of a condition (e.g. circularity per pH unit, z/unit), from a linear fit over that batch's groups with the other varying conditions in the fit. Comparable even when batches ran different conditions.
-  - **Matched (같은 조건)**: the value at a condition set run by two or more batches.
-  - **Batch median (대표값)**: median over the batch's groups; off by default for particles because it mixes in which conditions were run.
-- Particle values are group medians of robust z over all particles (shape values size-weighted) and particles per image. Blanks are "not recorded", never zero.
+| Sheet | Shape | Content |
+|---|---|---|
+| 배치 정보 | batch values | item · value · unit · category (구분) · note. One value per batch (name, purification date, column, protein concentration, zeta potential …). The category is the batch-map category. |
+| 형성 조건 | condition table | one row per condition ID (C01 …): pH, NaCl (mM), PEG (%), protein (µM) … |
+| 입자 형태 | per particle | one row per particle from the image analysis |
+| in vitro 실험 | per condition | repeated measurements per condition (FRAP recovery, FRAP t½, turbidity …) |
+| 세포 전달 | per condition | one row per delivery run: time and antibody dose (sub-conditions), cytoplasm / inside-particle signal, ratio (filled when blank) |
 
-## Batch map
-- **Distance**: only items both batches have. Numbers: difference relative to the range over batches (z items: 2 z = full difference; other numbers: differences below half the typical size count less); categories: 0 same / 1 different. Averaged within parts (typed, trend, matched, median), parts within a category, categories with the **category weights**, so a category with many items does not swamp one with few.
-- **Map**: PCoA of the distance. Each axis shows its share of variation and the items that change along it. Colour points by any item (e.g. position from observations, colour from purification).
-- Category weights (0 = off), parts and single items apply at once; after data or condition changes press 'Recompute batch map' (⌘B).
-- Tabs: per-category maps, distance table (n = shared items), batch dendrogram, reference-batch score (100 × (1 − distance to the reference)).
-- Two batches: distance only; three or more: the map.
+- Headers are `name (unit)`. Column roles: condition · measurement · sub-condition (time, dose) · replicate · note.
+- Sheet shapes, categories and roles are kept in a hidden `_droplet` sheet; without it (a file made in Excel) they are guessed from names.
+- Blanks are "not recorded", never zero.
+- `_템플릿.xlsx` in the folder is the starting layout for new batches. Files starting with `_` or `~$` are not batches.
 
-## Batch comparison
-- **Item differences**: B − A on every item, relative to the range over batches, largest first.
-- Particle level (after the particle analysis): groups paired by identical formation conditions — batch distance, per-measurement difference, matched reference-batch score.
+## Getting started
+- `File › New batch folder` (⌘N), `File › Open batch folder` (⌘O); folders, .xlsx and .dmap files can be dropped on the window.
+- `File › Open demo (5 batches)`: a synthetic batch folder (made-up data).
+- Projects from before 0.5 (data inside the .dmap) still open; `File › Export as batch files` writes a batch folder to edit from then on.
 
-## Import
-`File › Import (auto-detect)` (⌘O) or drag and drop: particle CSVs, condition CSVs (first column = group or batch), cell-delivery summaries, condition templates, projects. Importing CSVs asks for the batch. Older projects open as before.
+## Batch note (⌘E)
+- Left: batch files and the 📐 template. Center: one tab per sheet (edit like Excel, ⌘C / ⌘V tables from Excel, Delete clears). Right: sheet, column and row tools, CSV import, checks.
+- New batch from the template or as a copy of another batch (layout, conditions and batch values kept, measurements emptied).
+- CSV import: particle CSVs → the per-particle sheet, cell delivery summaries → the delivery sheet; each CSV group is assigned a condition ID. Group names are read only on the buttons "find from group names" (blanks only) and "make new conditions from names". Repeated data and files with mostly different measurements are refused.
+- Checks: duplicate or unknown condition IDs, non-numbers in measurement columns; cells are shown in red.
+- ⌘S saves, ⌘Z undoes. Changes saved from Excel are picked up automatically (changed files only).
 
-## Particle level
-Particle map (dot unit, colouring, cohesion, hierarchical sub-maps, per-batch maps, map inputs), condition comparison (effects within batches), reference score, cell delivery — as in 0.3. `입자 수준 › 입자 분석 실행` (⌘R).
+## Droplet Map
+- **Left – batches › formation conditions**; **center**: Batch map · Batch table (read-only) · Batch comparison · Data; **particle level** (closed at start): Particle map · Condition comparison · Reference score · Measurement sheets; **right**: settings and measurement weights.
+- **Batch table**: batch values from the batch sheet plus items computed per sheet — trend (change per condition unit within a batch, also per sub-condition), matched (value at a condition set run by two or more batches), batch median (off for particles by default); each sheet is a category, and the three kinds can be switched per sheet.
+- **Batch map**: Gower-like distance over shared items, averaged per part, per category and with category weights; PCoA map with axis items, per-category maps, distance table, dendrogram, reference-batch score.
+- **Batch comparison**: item differences, and at particle level groups paired by identical conditions.
+- **Measurement sheets**: any per-condition sheet against a formation condition or a sub-condition, one line per batch, a summary table, and the particles of the same condition side by side.
+- The particle analysis (⌘R) must be re-run when particle data change; changes to other sheets keep the result.
 
 ## Saving
-Per-feature saves in each menu; `Batch table › save` writes typed + computed items. `File › Save all results` (⇧⌘E) writes batch-map tables (batch_items, batch_distance, batch_map_coords, batch_map_score), particle-level results, figures and the project. `File › Save project` (⌘S) keeps data, conditions, batch values and categories, batch-map settings, weights, open tabs and the work log.
+The data are in the batch files. The project file (.dmap) holds only the analysis side: the folder location, column roles, references, map settings, weights, open tabs and the work log; if the folder moved you are asked for it. Per-feature saves are in each menu; `File › Save all results` (⇧⌘E) writes tables, measurement-sheet summaries, figures and the project into one folder.

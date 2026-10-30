@@ -7,7 +7,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from ..core.batches import UNASSIGNED
 from .common import FlowLayout, info_label, section, short_group
 
-KIND = QtCore.Qt.UserRole + 1       # tree item kind: batch / group / delivery-head / delivery
+KIND = QtCore.Qt.UserRole + 1       # tree item kind: batch / group
 
 
 class GroupPanel(QtWidgets.QWidget):
@@ -83,8 +83,7 @@ class GroupPanel(QtWidgets.QWidget):
         self.tree.clear()
         for b in p.batches.names():
             form = p.batches.groups_in(b, p.groups)
-            deliv = p.batches.groups_in(b, p.delivery.groups())
-            if not form and not deliv and b == UNASSIGNED:
+            if not form and b == UNASSIGNED:
                 continue
             bi = QtWidgets.QTreeWidgetItem([("★ " if b in brefs else "") + f"{b}  ({len(form)})"])
             bi.setData(0, QtCore.Qt.UserRole, b); bi.setData(0, KIND, "batch")
@@ -92,7 +91,7 @@ class GroupPanel(QtWidgets.QWidget):
             bi.setFlags(bi.flags() | QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsAutoTristate)
             if b == UNASSIGNED:
                 bi.setForeground(0, QtGui.QColor("#b05a00"))
-            tip = [f"<b>{b}</b>", f"입자 형성 그룹 {len(form)}개 · 세포 전달 그룹 {len(deliv)}개"]
+            tip = [f"<b>{b}</b>", f"형성 조건 {len(form)}개"]
             if b in p.batches.table.values.index:
                 for c in p.batches.table.schema:
                     v = p.batches.table.value(b, c.name)
@@ -101,7 +100,10 @@ class GroupPanel(QtWidgets.QWidget):
             self.tree.addTopLevelItem(bi)
             for g in form:
                 star = "★ " if g in refs else ""
-                it = QtWidgets.QTreeWidgetItem([f"{star}{short_group(g, 60)}"])     # full name in the tooltip
+                bfile = p.source.files.get(b)
+                cid = g.partition(" · ")[2]
+                label = f"{cid}  {bfile.condition_label(cid)}" if bfile is not None and cid else g
+                it = QtWidgets.QTreeWidgetItem([f"{star}{short_group(label, 60)}"])     # full name in the tooltip
                 it.setData(0, QtCore.Qt.UserRole, g); it.setData(0, KIND, "group")
                 it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
                 on = prev is None or g in prev or g not in known      # new groups start shown
@@ -114,20 +116,6 @@ class GroupPanel(QtWidgets.QWidget):
                 if star:
                     it.setForeground(0, QtGui.QColor("#8a6d00"))
                 bi.addChild(it)
-            if deliv:
-                di = QtWidgets.QTreeWidgetItem([f"세포 전달 ({len(deliv)})"])
-                di.setData(0, KIND, "delivery-head")
-                di.setFlags(QtCore.Qt.ItemIsEnabled)
-                di.setForeground(0, QtGui.QColor("#5b6b8a"))
-                for g in deliv:
-                    used = p.delivery.uses.get(g)
-                    ci = QtWidgets.QTreeWidgetItem([g])
-                    ci.setData(0, QtCore.Qt.UserRole, g); ci.setData(0, KIND, "delivery")
-                    ci.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
-                    ci.setForeground(0, QtGui.QColor("#5b6b8a"))
-                    ci.setToolTip(0, f"<b>{g}</b><br>사용한 입자: {used or '—'}")
-                    di.addChild(ci)
-                bi.addChild(di)
             bi.setExpanded(len([x for x in p.batches.names() if x != UNASSIGNED]) <= 1 or b in getattr(self, "_expanded", set()))
         self.tree.blockSignals(False)
         cur = self.cond.currentText()

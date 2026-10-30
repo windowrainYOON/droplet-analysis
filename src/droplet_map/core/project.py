@@ -142,6 +142,7 @@ class Project:
         if self.folder is None:
             return []
         new = Project.from_batchset(load_folder(self.folder), self.roles, self.settings, self.batches.references)
+        new.conditions.references = {g for g in self.conditions.references if g in new.groups}
         for k in ("particles", "roles", "conditions", "batches", "measures", "source"):
             setattr(self, k, getattr(new, k))
         self.delivery = Delivery()

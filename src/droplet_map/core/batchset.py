@@ -18,6 +18,8 @@ from .batchfile import (CAT_PURIFICATION, COND_ID, KIND_MEASURE, KIND_PARTICLES,
                         batch_paths, blank, fmt, read_batch_file, to_number)
 from .conditions import ConditionDef, ConditionTable
 
+SOURCE_COLUMN = "원본 파일"     # importing.py writes it: the CSV a particle row came from
+
 SEP = " · "
 NO_IMAGE = "이미지 없음"
 
@@ -175,7 +177,11 @@ def formation_tables(bs: BatchSet):
         d = d.drop(columns=[COND_ID] + rep[:1])
         d.insert(0, "group", [group_name(bname, i) for i in cid[ok]])
         d.insert(1, "image", image.to_numpy())
-        d["source_file"] = bf.path.name if bf.path else bname
+        here = bf.path.name if bf.path else bname
+        if SOURCE_COLUMN in d:          # the image-analysis file each particle came from
+            d["source_file"] = d[SOURCE_COLUMN].map(lambda v: here if blank(v) else f"{here}: {v}")
+        else:
+            d["source_file"] = here
         frames.append(d)
     used = {k for r in rows.values() for k, v in r.items() if not blank(v)}
     schema = [c for c in schema if c.name in used]          # a column nobody filled in says nothing

@@ -14,3 +14,8 @@ logs/
 examples/private/
 analysis/phase0/out/
 .briefcase/
+
+# batch files are experiment data (public repo)
+*.xlsx
+*.xlsm
+~$*

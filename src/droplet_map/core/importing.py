@@ -12,12 +12,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from .batchset import SOURCE_COLUMN
 from .batchfile import (COND_ID, ROLE_CONDITION, ROLE_SUB, BatchFile, Column, Sheet, blank, fmt, to_number)
 from .conditions import parse_group_name
 from .delivery import Delivery, parse_delivery_name, read_delivery_csv
 from .io import content_digest, read_particle_csv
 
-SOURCE_COLUMN = "원본 파일"
 GROUP_COLUMN = "원본 그룹"
 
 

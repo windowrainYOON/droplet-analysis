@@ -17,9 +17,9 @@ EXPORT_ITEMS = (("batch_map", "배치 지도 (배치 표 전체 항목, 거리 �
                 ("assoc", "조건 × 파라미터 연관 (강도, 부호, n)"),
                 ("distance", "그룹 간 거리 행렬"),
                 ("composition", "그룹별 군집 구성 비율 (현재 지도)"),
-                ("conditions", "조건 표 (배치, 배치 조건, 그룹 조건; 세포 전달 그룹 포함)"),
+                ("conditions", "형성 조건 표 (배치, 배치 값, 형성 조건)"),
                 ("batch", "같은 조건 기준 배치 score (배치 비교 탭에서 계산한 경우)"),
-                ("delivery", "세포 전달 요약 (영역별 강도, 세포질/입자 비율)"),
+                ("measures", "조건별 측정 시트 요약 (in vitro 실험, 세포 전달 …: 반복의 중앙값)"),
                 ("settings", "분석 설정값 (settings.json)"),
                 ("figures", "현재 그림 전부 (PNG, 200 dpi)"))
 
@@ -116,11 +116,15 @@ def write_exports(out: Path, project, result, which: dict, figures: dict, partic
                 csv(result.profiles.composition, "cluster_composition.csv")
     if which.get("batch") and batch_score is not None:
         csv(batch_score, "batch_reference_score.csv")
-    if which.get("delivery") and not project.delivery.empty():
-        d = project.delivery.measures()
-        d.insert(0, "배치", [project.batch_of(g) for g in d.index])
-        d.insert(1, "사용한 입자 형성 그룹", [project.delivery.uses.get(g, "") for g in d.index])
-        csv(d, "cell_delivery_summary.csv")
+    if which.get("measures"):
+        from ..core.batchfile import safe_file_name
+        for m in project.measures:
+            d = m.measures.copy()
+            d.insert(0, "배치", [m.batch_of[g] for g in d.index])
+            d.insert(1, "형성 그룹", [m.formation_of[g] for g in d.index])
+            for s in m.subs:
+                d.insert(2, s, [m.cond.value(g, s) for g in d.index])
+            csv(d, f"sheet_{safe_file_name(m.name)}_summary.csv")
     if which.get("settings"):
         import json
         p = out / "settings.json"
@@ -143,15 +147,8 @@ def write_exports(out: Path, project, result, which: dict, figures: dict, partic
 
 
 def _conditions_csv(project) -> str:
-    """Formation groups with their batch and the batch's conditions, then cell delivery groups."""
+    """Formation groups with their batch and the batch's values."""
     v = project.view
     out = v.values.copy()
     out.insert(0, "기준 그룹", ["★" if g in v.references else "" for g in out.index])
-    out.insert(1, "실험", "입자 형성")
-    if project.delivery.groups():
-        d = project.delivery_view.values.copy()
-        d.insert(0, "기준 그룹", "")
-        d.insert(1, "실험", "세포 전달")
-        d["사용한 입자 형성 그룹"] = [project.delivery.uses.get(g, "") for g in d.index]
-        out = pd.concat([out, d], sort=False)
     return out.to_csv()

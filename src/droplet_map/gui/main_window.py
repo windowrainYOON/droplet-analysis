@@ -1,8 +1,10 @@
-"""Main window: left batch › group list · center views · right settings tabs, one menu per feature,
-auto-detecting import, work log and background workers.
+"""Main window: left batch › formation condition list · center views · right settings tabs, one menu
+per feature, work log and background workers.
 
-Main flow: 배치 지도 · 배치 표 · 배치 비교 (batch level). Data entry: 데이터 · 그룹 조건. Particle level
-(입자 지도, 조건 비교, 기준 score, 세포 전달) opens from the 입자 수준 menu or from a batch on the map."""
+Data come from a folder of batch files (one Excel workbook per batch), edited in the batch note
+window or in Excel; the folder is watched and read again when a file changes. Main flow: 배치 지도 ·
+배치 표 · 배치 비교 (batch level). Particle level (입자 지도, 조건 비교, 기준 score, 측정 시트) opens
+from the 입자 수준 menu or from a batch on the map."""
 from __future__ import annotations
 
 import time
@@ -16,22 +18,23 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from .. import __version__
 from ..core.analysis import map_rows, particle_map, reference_score, run_all
 from ..core.batches import UNASSIGNED
-from ..core.io import classify_file
+from ..core.batchfile import batch_paths
+from ..core.batchset import forget_cache
 from ..core.project import Project
 from .common import app_icon, save_figure_dialog, save_frame_dialog, set_group_names, warn
 from .batch_map_page import BatchMapPage
 from .batch_page import BatchPage
 from .batch_table_page import BatchTablePage
 from .compare_page import ComparePage
-from .conditions_page import ConditionsPage
 from .data_page import DataPage
-from .delivery_page import DeliveryPage
 from .export_page import ExportDialog, export_folder_name, write_exports
 from .map_page import MapPage
+from .measure_page import MeasurePage
 from .score_page import ScorePage
 from .side_panels import GroupPanel, WeightsPanel
 
 MAX_RECENT = 8
+RELOAD_DELAY_MS = 1500     # Excel writes a file in several steps: wait until it settles
 # numba (UMAP) compiles on first use and overflows QThread's 512 KB default stack on macOS,
 # which kills the app without a Python traceback.
 WORKER_STACK = 64 * 1024 * 1024
@@ -72,15 +75,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.batch_table_page = BatchTablePage(self)
         self.batch_page = BatchPage(self)
         self.data_page = DataPage(self)
-        self.cond_page = ConditionsPage(self)
         self.map_page = MapPage(self)
         self.compare_page = ComparePage(self)
         self.score_page = ScorePage(self)
-        self.delivery_page = DeliveryPage(self)
-        self.pages = [self.batch_map_page, self.batch_table_page, self.batch_page, self.cond_page, self.data_page,
-                      self.map_page, self.compare_page, self.score_page, self.delivery_page]
+        self.measure_page = MeasurePage(self)
+        self.pages = [self.batch_map_page, self.batch_table_page, self.batch_page, self.data_page,
+                      self.map_page, self.compare_page, self.score_page, self.measure_page]
         # particle level: closed until asked for (입자 수준 menu, or a batch on the batch map)
-        self.particle_pages = [self.map_page, self.compare_page, self.score_page, self.delivery_page]
+        self.particle_pages = [self.map_page, self.compare_page, self.score_page, self.measure_page]
+        self.note_window = None
+
+        self.watcher = QtCore.QFileSystemWatcher(self)
+        self.watcher.directoryChanged.connect(self._folder_touched)
+        self.watcher.fileChanged.connect(self._folder_touched)
+        self.reload_timer = QtCore.QTimer(self)
+        self.reload_timer.setSingleShot(True)
+        self.reload_timer.setInterval(RELOAD_DELAY_MS)
+        self.reload_timer.timeout.connect(self.reload_folder)
+        self._stamps = {}
 
         self.groups_panel = GroupPanel()
         self.weights = WeightsPanel()
@@ -112,7 +124,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # signals between panes
         self.data_page.changed.connect(self._data_changed)
-        self.cond_page.changed.connect(self._conditions_changed)
         self.groups_panel.visible_changed.connect(self._visible_changed)
         self.groups_panel.references_changed.connect(self._references_changed)
         self.map_page.run_requested.connect(self.rerun_map)
@@ -125,7 +136,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.batch_map_page.settings_changed.connect(self._batch_map_settings_changed)
         self.batch_map_page.particle_map_requested.connect(self.open_batch_particles)
         self.batch_map_page.compare_requested.connect(self.open_batch_compare)
-        self.batch_table_page.changed.connect(self._batch_table_changed)
+        self.batch_table_page.edit_requested.connect(lambda: self.open_batch_note())
         self.batch_table_page.kinds_changed.connect(self._batch_kinds_changed)
 
         self.progress = QtWidgets.QProgressBar(); self.progress.setRange(0, 0); self.progress.setMaximumWidth(160); self.progress.hide()
@@ -133,7 +144,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_menus()
         self._set_enabled(False)
         self._update_title()
-        self.statusBar().showMessage("파일 › 불러오기로 입자 CSV나 프로젝트(.dmap)를 여세요. 창에 끌어다 놓아도 됩니다.")
+        self.statusBar().showMessage("파일 › 배치 폴더 열기(⌘O)로 배치 파일 폴더를 여세요. 폴더나 .dmap을 창에 끌어다 놓아도 됩니다.")
 
     # ---- menus -----------------------------------------------------------
     def _act(self, menu, text, fn, shortcut=None, checkable=False):
@@ -148,11 +159,17 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_menus(self):
         mb = self.menuBar()
         f = mb.addMenu("파일")
-        self._act(f, "새 프로젝트 (입자 CSV)…", self.new_from_csv, QtGui.QKeySequence.New)
-        self._act(f, "불러오기 (자동 인식)…", self.import_files, QtGui.QKeySequence.Open)
-        self._act(f, "가상 예제 프로젝트 열기 (배치 5개)", self.open_demo)
-        self.recent_menu = f.addMenu("최근 프로젝트")
+        self._act(f, "배치 폴더 열기…", self.open_folder_dialog, QtGui.QKeySequence.Open)
+        self._act(f, "새 배치 폴더 만들기…", self.new_folder, QtGui.QKeySequence.New)
+        self._act(f, "프로젝트 열기 (.dmap)…", self.open_project, "Ctrl+Shift+O")
+        self._act(f, "가상 예제 열기 (배치 5개)", self.open_demo)
+        self.recent_menu = f.addMenu("최근 연 폴더 · 프로젝트")
         self._fill_recent()
+        f.addSeparator()
+        self.a_note = self._act(f, "배치 노트 열기 (배치 파일 편집)…", lambda: self.open_batch_note(), "Ctrl+E")
+        self.a_reload = self._act(f, "배치 폴더 다시 읽기", self.reload_folder, "Ctrl+Shift+R")
+        self.a_reveal = self._act(f, "배치 폴더 보기 (Finder)", self.reveal_folder)
+        self.a_export_files = self._act(f, "배치 파일로 꺼내기 (예전 프로젝트)…", self.export_batch_files)
         f.addSeparator()
         self.a_save = self._act(f, "프로젝트 저장", self.save, QtGui.QKeySequence.Save)
         self.a_saveas = self._act(f, "다른 이름으로 저장…", self.save_as, QtGui.QKeySequence.SaveAs)
@@ -180,8 +197,8 @@ class MainWindow(QtWidgets.QMainWindow):
         btm = mb.addMenu("배치 표")
         self.tab_actions[self.batch_table_page] = self._act(btm, "배치 표 탭 열기", lambda on: self._set_tab_open(self.batch_table_page, on), checkable=True)
         btm.addSeparator()
-        self._act(btm, "배치 값 CSV 불러오기…", lambda: self._need_project() and self.cond_page.import_csv())
-        self._act(btm, "배치 표 저장 (직접 입력 + 계산한 항목, CSV)…", self._save_batch_items)
+        self._act(btm, "배치 노트에서 편집…", lambda: self.open_batch_note())
+        self._act(btm, "배치 표 저장 (배치 값 + 계산한 항목, CSV)…", self._save_batch_items)
 
         bm = mb.addMenu("배치 비교")
         self.tab_actions[self.batch_page] = self._act(bm, "배치 비교 탭 열기", lambda on: self._set_tab_open(self.batch_page, on), checkable=True)
@@ -196,15 +213,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         dm = mb.addMenu("데이터")
         self.tab_actions[self.data_page] = self._act(dm, "데이터 탭 열기", lambda on: self._set_tab_open(self.data_page, on), checkable=True)
-        self.tab_actions[self.cond_page] = self._act(dm, "그룹 조건 탭 열기", lambda on: self._set_tab_open(self.cond_page, on), checkable=True)
         dm.addSeparator()
-        self.a_add = self._act(dm, "입자 CSV 추가…", self.add_csv)
-        self._act(dm, "세포 전달 요약 CSV 추가…", self.add_delivery)
-        dm.addSeparator()
-        self._act(dm, "조건 CSV 불러오기 (그룹 또는 배치)…", lambda: self._need_project() and self.cond_page.import_csv())
-        self._act(dm, "조건 CSV 저장…", lambda: self._need_project() and self.cond_page.export_csv())
-        self._act(dm, "조건 목록 템플릿 불러오기…", lambda: self._need_project() and self.cond_page.load_template())
-        self._act(dm, "조건 목록 템플릿 저장…", lambda: self._need_project() and self.cond_page.save_template())
+        self._act(dm, "입자 CSV · 세포 전달 CSV 넣기 (배치 노트)…", lambda: self.open_batch_note())
         dm.addSeparator()
         self.a_save_particles = self._act(dm, "입자 표 저장 (QC 통과 + 지도 좌표·군집, CSV)…", self._save_particles)
 
@@ -238,12 +248,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._act(sm, "분포 비교 그림 저장…", lambda: self._save_fig(self.score_page.dist, "reference_distributions"))
         self._act(sm, "score 표 저장 (CSV)…", self._save_score)
 
-        vm = pl.addMenu("세포 전달")
-        self.tab_actions[self.delivery_page] = self._act(vm, "세포 전달 탭 열기", lambda on: self._set_tab_open(self.delivery_page, on), checkable=True)
+        vm = pl.addMenu("측정 시트 (in vitro · 세포 전달 …)")
+        self.tab_actions[self.measure_page] = self._act(vm, "측정 시트 탭 열기", lambda on: self._set_tab_open(self.measure_page, on), checkable=True)
         vm.addSeparator()
-        self._act(vm, "세포 전달 요약 CSV 추가…", self.add_delivery)
-        self._act(vm, "강도 그림 저장…", lambda: self._save_fig(self.delivery_page.plot, "cell_delivery"))
-        self._act(vm, "세포 전달 요약 표 저장 (CSV)…", self._save_delivery)
+        self._act(vm, "그림 저장…", lambda: self._save_fig(self.measure_page.plot, "measurement_sheet"))
+        self._act(vm, "조건별 요약 표 저장 (CSV)…", self._save_measure)
 
         for a in self.tab_actions.values():
             a.setChecked(True)
@@ -256,7 +265,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _need_project(self):
         if self.project is None:
-            warn(self, "먼저 입자 CSV나 프로젝트를 여세요.")
+            warn(self, "먼저 배치 폴더나 프로젝트를 여세요.")
             return False
         return True
 
@@ -267,7 +276,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def _set_enabled(self, on):
-        for a in (self.a_save, self.a_saveas, self.a_export, self.a_add, self.a_run, self.a_save_particles, self.a_bmap):
+        for a in (self.a_save, self.a_saveas, self.a_export, self.a_run, self.a_save_particles, self.a_bmap,
+                  self.a_reload, self.a_reveal, self.a_export_files):
             a.setEnabled(on)
         self.weights.setEnabled(on)
 
@@ -285,7 +295,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.right.setTabText(0, f"{p.title} 설정")
 
     def _update_title(self):
-        name = self.project.path.name if self.project and self.project.path else ("제목 없음" if self.project else "")
+        p = self.project
+        name = p.path.name if p and p.path else (p.folder.name if p and p.folder else ("제목 없음" if p else ""))
         star = " *" if self.dirty else ""
         self.setWindowTitle(f"Droplet Map {__version__}" + (f" — {name}{star}" if name else ""))
 
@@ -336,11 +347,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if dirty:
             self._mark_dirty()
 
-    def _batch_table_changed(self):
-        self._conditions_changed()
-        self.cond_page.refresh_all()
-        self.batch_map_page.compute()
-
     def _batch_kinds_changed(self):
         self._mark_dirty()
         self.batch_map_page.compute()
@@ -388,7 +394,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _conditions_changed(self):
         self._mark_dirty()
         self.groups_panel.refresh()
-        for p in (self.map_page, self.compare_page, self.score_page, self.batch_page, self.delivery_page,
+        for p in (self.map_page, self.compare_page, self.score_page, self.batch_page, self.measure_page,
                   self.batch_table_page, self.batch_map_page):
             p.conditions_changed()
         if self.result is not None:
@@ -396,7 +402,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _references_changed(self):
         self._mark_dirty()
-        self.cond_page.model.refresh()
         self.score_page.conditions_changed()
         self.batch_page.conditions_changed()
         self.batch_table_page.refresh()
@@ -427,7 +432,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return self.save()
         return r == QtWidgets.QMessageBox.Discard
 
-    def set_project(self, project: Project, dirty=False):
+    def set_project(self, project: Project, dirty=False, keep_result=None):
         self.project = project
         self.result = None
         self._used = None
@@ -440,57 +445,210 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_enabled(True)
         self._restore_ui(project.ui)
         self._update_title()
+        self._watch()
+        if self.note_window is not None:
+            self.note_window.set_folder(project.folder)
         self.batch_map_page.visible = self.groups_panel.visible_batches()
         self.batch_map_page.compute()
+        if keep_result is not None:
+            self.result, self._used = keep_result
+            for p in (self.map_page, self.compare_page, self.score_page, self.batch_page, self.measure_page):
+                p.set_result(self.result)
+            self.map_page.set_visible_groups(self.groups_panel.visible_groups())
+            return
         n_b = len([b for b in project.batches.names() if b != UNASSIGNED])
-        self.log(f"불러옴: 배치 {n_b}개 · 그룹 {len(project.groups)}개 · 입자 {len(project.particles):,}개")
+        n_p = int(project.particles["group"].nunique()) if len(project.particles) else 0
+        self.log(f"불러옴: 배치 {n_b}개 · 형성 조건 {len(project.groups)}개 (입자 있는 조건 {n_p}개) · "
+                 f"입자 {len(project.particles):,}개 · 조건별 측정 시트 {len(project.measures)}개")
         self.map_page.set_stale("아직 분석 전입니다. 툴바의 '입자 분석 실행'(⌘R)을 누르세요.")
 
-    def new_from_csv(self):
+    def _show_notes(self, notes):
+        for n in notes:
+            self.log(n)
+        if notes:
+            QtWidgets.QMessageBox.information(self, "불러오기 확인", "\n\n".join(notes))
+
+    # ---- batch folder ----------------------------------------------------------
+    def open_folder_dialog(self):
+        start = str(self.project.folder) if self.project and self.project.folder else str(Path.home() / "Documents")
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "배치 폴더 열기 (배치 파일 .xlsx가 있는 폴더)", start)
+        if folder:
+            self.open_folder(folder)
+
+    def open_folder(self, folder):
         if not self._confirm_discard():
             return
-        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "입자 CSV 열기", str(Path.home()), "CSV (*.csv *.txt)")
-        if paths:
-            self._open_particles(paths)
-
-    def ask_batch(self, what: str, n: int, project=None):
-        """Which batch the files' groups belong to. Returns the batch name, '' (decide later) or None
-        (cancel). Replaced in the self-test."""
-        names = [b for b in (project.batches.names() if project else []) if b != UNASSIGNED]
-        dlg = QtWidgets.QDialog(self)
-        dlg.setWindowTitle("배치 지정")
-        lay = QtWidgets.QVBoxLayout(dlg)
-        lay.addWidget(QtWidgets.QLabel(f"{what} {n}개의 그룹은 어느 정제 배치의 단백질로 만들었나요?"))
-        cb = QtWidgets.QComboBox(); cb.setEditable(True); cb.addItems(names)
-        cb.lineEdit().setPlaceholderText("배치 이름 (예: 정제 로트 번호)")
-        if len(names) == 1:
-            cb.setCurrentIndex(0)
-        else:
-            cb.setEditText("")
-        lay.addWidget(cb)
-        lay.addWidget(QtWidgets.QLabel("<span style='color:#666'>비워 두면 '배치 미지정'으로 두고, 조건 탭에서 나중에 정할 수 있습니다.</span>"))
-        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
-        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
-        lay.addWidget(bb)
-        if not dlg.exec():
-            return None
-        return cb.currentText().strip()
-
-    def _open_particles(self, paths):
-        batch = self.ask_batch("입자 CSV", len(paths))
-        if batch is None:
-            return
+        folder = Path(folder)
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
-            pr = Project.from_csv(paths, batch=batch or None)
+            pr = Project.open_folder(folder)
         except Exception as e:
-            warn(self, f"CSV를 읽지 못했습니다.\n{e}"); return
-        self.set_project(pr, dirty=True)
-        self.log(f"입자 CSV {len(paths)}개 열기: " + ", ".join(Path(p).name for p in paths))
-        self._show_notes(pr.notes)
-        self._set_tab_open(self.cond_page, True)
+            QtWidgets.QApplication.restoreOverrideCursor()
+            warn(self, f"배치 폴더를 읽지 못했습니다.\n{e}"); return
+        QtWidgets.QApplication.restoreOverrideCursor()
+        self.set_project(pr)
+        self._add_recent(folder)
+        if not pr.source.files:
+            self.log(f"배치 폴더 {folder.name}: 배치 파일이 아직 없습니다.")
+            if QtWidgets.QMessageBox.question(
+                    self, "배치 폴더", f"'{folder.name}' 폴더에 배치 파일(.xlsx)이 없습니다.\n배치 노트를 열어 첫 배치를 만들까요?") \
+                    == QtWidgets.QMessageBox.Yes:
+                self.open_batch_note()
+            return
+        self._set_tab_open(self.batch_map_page, True)
+        if pr.notes:
+            self._show_notes(pr.notes)
 
+    def new_folder(self):
+        """A new (empty) batch folder with the default template, then the batch note to fill it."""
+        if not self._confirm_discard():
+            return
+        base = QtWidgets.QFileDialog.getExistingDirectory(self, "새 배치 폴더를 만들 곳", str(Path.home() / "Documents"))
+        if not base:
+            return
+        name, ok = QtWidgets.QInputDialog.getText(self, "새 배치 폴더", "폴더 이름 (예: 단백질 이름):", text="배치 노트")
+        if not ok or not name.strip():
+            return
+        from ..core.batchfile import TEMPLATE_NAME, template, write_batch_file
+        folder = Path(base) / name.strip()
+        folder.mkdir(parents=True, exist_ok=True)
+        if not (folder / TEMPLATE_NAME).exists():
+            write_batch_file(template(), folder / TEMPLATE_NAME)
+        self.dirty = False
+        self.set_project(Project.open_folder(folder))
+        self._add_recent(folder)
+        self.log(f"새 배치 폴더: {folder}")
+        self.open_batch_note(new_batch=True)
+
+    def reveal_folder(self):
+        if self._need_project() and self.project.folder is not None:
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(self.project.folder)))
+
+    def open_batch_note(self, new_batch=False, csv_paths=None):
+        """The batch note window: edits the batch files of the open folder."""
+        from .batch_note import BatchNoteWindow
+        if self.project is None or self.project.folder is None:
+            if self.project is not None and self.project.folder is None:
+                warn(self, "이 프로젝트는 아직 배치 파일이 없습니다. 먼저 '파일 › 배치 파일로 꺼내기'로 폴더에 쓰세요.")
+            else:
+                warn(self, "먼저 배치 폴더를 여세요 (파일 › 배치 폴더 열기, 또는 새 배치 폴더 만들기).")
+            return None
+        if self.note_window is None:
+            self.note_window = BatchNoteWindow()
+            self.note_window.saved.connect(self._note_saved)
+        self.note_window.set_folder(self.project.folder)
+        self.note_window.show(); self.note_window.raise_(); self.note_window.activateWindow()
+        if new_batch:
+            self.note_window.new_batch()
+        if csv_paths:
+            self.note_window.import_csvs(csv_paths)
+        return self.note_window
+
+    def _note_saved(self, path):
+        forget_cache(path)
+        self.reload_timer.start(200)
+
+    def export_batch_files(self) -> bool:
+        """An old project (data inside the .dmap): write its batches as batch files into a folder."""
+        if not self._need_project():
+            return False
+        p = self.project
+        start = (p.path.parent if p.path else Path.home() / "Documents")
+        base = QtWidgets.QFileDialog.getExistingDirectory(self, "배치 파일을 쓸 폴더를 만들 곳", str(start))
+        if not base:
+            return False
+        name = (p.path.stem if p.path else "droplet") + " 배치 파일"
+        folder = Path(base) / name
+        if folder.exists() and any(batch_paths(folder)):
+            warn(self, f"'{folder}' 폴더에 이미 배치 파일이 있습니다. 다른 곳을 고르세요."); return False
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            files = p.export_batch_files(folder)
+        except Exception as e:
+            QtWidgets.QApplication.restoreOverrideCursor()
+            warn(self, f"배치 파일을 쓰지 못했습니다.\n{e}"); return False
+        QtWidgets.QApplication.restoreOverrideCursor()
+        self._watch()
+        self._mark_dirty()
+        self.log(f"배치 파일로 꺼냄: {folder} (배치 {len(files)}개). 이제 이 폴더가 데이터입니다.")
+        QtWidgets.QMessageBox.information(
+            self, "배치 파일로 꺼내기",
+            f"배치 {len(files)}개를 '{folder}'에 배치 파일로 썼습니다.\n\n이제 데이터는 이 폴더에서 읽습니다. "
+            "프로젝트를 저장하면 .dmap에는 분석 설정과 폴더 위치만 들어갑니다.")
+        return True
+
+    # ---- watching the folder ------------------------------------------------------
+    def _stamp(self) -> dict:
+        f = self.project.folder if self.project else None
+        if f is None or not f.is_dir():
+            return {}
+        out = {}
+        for p in batch_paths(f):
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            out[p.name] = (st.st_mtime, st.st_size)
+        return out
+
+    def _watch(self):
+        w = self.watcher
+        if w.files():
+            w.removePaths(w.files())
+        if w.directories():
+            w.removePaths(w.directories())
+        f = self.project.folder if self.project else None
+        if f is None or not f.is_dir():
+            self._stamps = {}
+            return
+        w.addPath(str(f))
+        files = [str(p) for p in batch_paths(f)]
+        if files:
+            w.addPaths(files)
+        self._stamps = self._stamp()
+
+    def _folder_touched(self, *_):
+        self.reload_timer.start()
+
+    def reload_folder(self):
+        """Read the batch folder again (only changed files are parsed); keep settings and view."""
+        p = self.project
+        if p is None or p.folder is None:
+            return
+        if self._thread is not None:          # finish the running calculation first
+            self.reload_timer.start()
+            return
+        new = self._stamp()
+        if new == self._stamps and self.sender() is not self.a_reload:
+            self._watch()                     # a temp file came and went; files may have been replaced
+            return
+        old = self._stamps
+        changed = sorted(n for n in new if n in old and new[n] != old[n])
+        added = sorted(set(new) - set(old))
+        gone = sorted(set(old) - set(new))
+        before = (len(p.particles), pd.util.hash_pandas_object(p.particles, index=False).sum() if len(p.particles) else 0)
+        self._collect_settings()
+        p.ui = self._ui_state()
+        try:
+            notes = p.reload()
+        except Exception as e:
+            self.log(f"배치 폴더를 다시 읽지 못했습니다: {e}")
+            self._watch()
+            return
+        after = (len(p.particles), pd.util.hash_pandas_object(p.particles, index=False).sum() if len(p.particles) else 0)
+        keep = (self.result, self._used) if self.result is not None and before == after else None
+        self.set_project(p, dirty=self.dirty, keep_result=keep)
+        what = ", ".join([f"{n} 바뀜" for n in changed] + [f"{n} 추가" for n in added] + [f"{n} 없어짐" for n in gone])
+        self.log("배치 폴더 다시 읽음" + (f": {what}" if what else "")
+                 + ("" if keep or self.result is None else " · 입자 데이터가 바뀌어 입자 분석은 다시 실행해야 합니다"))
+        if self.result is None and before != after and before[0]:
+            self.map_page.set_stale("배치 파일의 입자 데이터가 바뀌었습니다. '입자 분석 실행'(⌘R)으로 다시 계산하세요.")
+        for n in notes:
+            self.log(n)
+
+    # ---- opening ----------------------------------------------------------------
     def open_demo(self):
-        """Synthetic five-batch project, to try the batch level before real batches exist."""
+        """Synthetic five-batch folder, to try the batch level before real batches exist."""
         if not self._confirm_discard():
             return
         from ..demo import demo_project
@@ -499,109 +657,35 @@ class MainWindow(QtWidgets.QMainWindow):
             pr = demo_project()
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
-        self.set_project(pr, dirty=True)
-        self.log("가상 예제 프로젝트: 배치 5개 (B01 품질 높음 → B05 낮음), 배치마다 실험한 조건이 조금씩 다름, 제타 포텐셜·세포 전달 포함")
+        self.set_project(pr)
+        self.log(f"가상 예제: 배치 5개 (B01 품질 높음 → B05 낮음), 배치마다 실험한 조건이 조금씩 다름, "
+                 f"제타 포텐셜 · FRAP · 세포 전달 포함 — 폴더 {pr.folder}")
         self._set_tab_open(self.batch_map_page, True)
 
-    def _show_notes(self, notes):
-        for n in notes:
-            self.log(n)
-        if notes:
-            QtWidgets.QMessageBox.information(self, "불러오기 확인", "\n\n".join(notes))
-
-    def add_csv(self, paths=None):
-        if not self._need_project():
-            return
-        if not paths:
-            paths, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "입자 CSV 추가", str(Path.home()), "CSV (*.csv *.txt)")
-            if not paths:
-                return
-        batch = self.ask_batch("입자 CSV", len(paths), self.project)
-        if batch is None:
-            return
-        n0 = len(self.project.particles)
-        ui = self._ui_state()           # before the new groups exist, so they come in shown
-        try:
-            notes = self.project.add_csv(paths, batch=batch or None)
-        except Exception as e:
-            warn(self, f"CSV를 추가하지 못했습니다.\n{e}"); return
-        added = len(self.project.particles) - n0
-        self.project.ui = ui
-        self.set_project(self.project, dirty=self.dirty or added > 0)
-        self.log(f"입자 CSV 추가: 입자 {added:,}개 (" + ", ".join(Path(p).name for p in paths) + ")")
-        self._show_notes(notes)
-
-    def add_delivery(self, paths=None):
-        if not self._need_project():
-            return
-        if not paths:
-            paths, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "세포 전달 요약 CSV 추가", str(Path.home()), "CSV (*.csv *.txt)")
-            if not paths:
-                return
-        batch = self.ask_batch("세포 전달 CSV", len(paths), self.project)
-        if batch is None:
-            return
-        n0 = len(self.project.delivery.groups())
-        try:
-            notes = self.project.add_delivery(paths, batch=batch or None)
-        except Exception as e:
-            warn(self, f"세포 전달 CSV를 추가하지 못했습니다.\n{e}"); return
-        self._mark_dirty()
-        self.cond_page.set_project(self.project)
-        self.groups_panel.refresh()
-        self.delivery_page.refresh()
-        self.batch_page.conditions_changed()
-        self.batch_table_page.refresh()
-        self.batch_map_page.compute()
-        n = len(self.project.delivery.groups()) - n0
-        self.log(f"세포 전달 CSV 추가: 그룹 {n}개 (" + ", ".join(Path(p).name for p in paths) + ")")
-        self._show_notes(notes)
-        self._set_tab_open(self.delivery_page, True)
-
     def import_files(self, paths=None):
-        if not paths:
-            paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
-                self, "불러오기 (자동 인식)", str(Path.home()),
-                "Droplet Map 파일 (*.dmap *.csv *.txt *.json);;모든 파일 (*)")
-            if not paths:
-                return
-        kinds = {p: classify_file(p) for p in paths}
-        projects = [p for p, k in kinds.items() if k == "project"]
-        particles = [p for p, k in kinds.items() if k == "particles"]
-        conds = [p for p, k in kinds.items() if k == "conditions"]
-        templates = [p for p, k in kinds.items() if k == "template"]
-        deliveries = [p for p, k in kinds.items() if k == "delivery"]
-        unknown = [p for p, k in kinds.items() if k == "unknown"]
-        if projects:
-            self.open_project(projects[0])
-        if particles:
-            if self.project is None:
-                self._open_particles(particles)
+        """Dropped or chosen files: a folder or .xlsx opens its batch folder, a .dmap opens the project,
+        CSVs go into a batch file through the batch note."""
+        paths = [Path(p) for p in (paths or [])]
+        dirs = [p for p in paths if p.is_dir()]
+        dmaps = [p for p in paths if p.suffix.lower() == ".dmap"]
+        books = [p for p in paths if p.suffix.lower() in (".xlsx", ".xlsm")]
+        csvs = [p for p in paths if p.suffix.lower() in (".csv", ".txt")]
+        other = [p for p in paths if p not in dirs + dmaps + books + csvs]
+        if dmaps:
+            self.open_project(str(dmaps[0]))
+        elif dirs:
+            self.open_folder(dirs[0])
+        elif books:
+            folder = books[0].parent
+            if self.project is None or self.project.folder != folder:
+                self.open_folder(folder)
+        if csvs:
+            if self.project is None or self.project.folder is None:
+                warn(self, "CSV는 배치 파일에 넣어 씁니다. 먼저 배치 폴더를 열거나 만드세요 (파일 › 새 배치 폴더 만들기).")
             else:
-                r = QtWidgets.QMessageBox.question(
-                    self, "입자 CSV", f"입자 CSV {len(particles)}개를 지금 프로젝트에 추가할까요?\n"
-                                     "'아니요'를 누르면 새 프로젝트로 엽니다.",
-                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel)
-                if r == QtWidgets.QMessageBox.Yes:
-                    self.add_csv(particles)
-                elif r == QtWidgets.QMessageBox.No and self._confirm_discard():
-                    self._open_particles(particles)
-        if deliveries:
-            if self.project is None:
-                warn(self, "세포 전달 요약은 입자 데이터를 먼저 연 다음에 불러올 수 있습니다.")
-            else:
-                self.add_delivery(deliveries)
-        if self.project is not None:
-            for p in templates:
-                self.cond_page.load_template_path(p)
-                self.log(f"조건 템플릿 불러옴: {Path(p).name}")
-            for p in conds:
-                self.cond_page.import_csv_path(p)
-                self.log(f"조건 CSV 불러옴: {Path(p).name}")
-        elif templates or conds:
-            warn(self, "조건 파일은 입자 데이터를 먼저 연 다음에 불러올 수 있습니다.")
-        if unknown:
-            warn(self, "무슨 파일인지 알 수 없어 건너뛰었습니다:\n" + "\n".join(Path(p).name for p in unknown))
+                self.open_batch_note(csv_paths=[str(p) for p in csvs])
+        if other:
+            warn(self, "무슨 파일인지 알 수 없어 건너뛰었습니다:\n" + "\n".join(p.name for p in other))
 
     def dragEnterEvent(self, e):
         if e.mimeData().hasUrls():
@@ -620,14 +704,33 @@ class MainWindow(QtWidgets.QMainWindow):
             if not path:
                 return
         try:
-            pr = Project.load(path)
+            try:
+                pr = Project.load(path)
+            except FileNotFoundError as e:
+                warn(self, f"이 프로젝트가 읽던 배치 폴더를 찾지 못했습니다:\n{e}\n\n옮긴 폴더를 골라 주세요.")
+                folder = QtWidgets.QFileDialog.getExistingDirectory(self, "배치 폴더 찾기", str(Path(path).parent))
+                if not folder:
+                    return
+                pr = Project.load(path, folder=folder)
+                pr.notes.append(f"배치 폴더 위치가 바뀌었습니다: {folder} (저장하면 새 위치를 기억합니다).")
             self.set_project(pr)
         except Exception as e:
             warn(self, f"프로젝트를 열지 못했습니다.\n{e}"); return
         self._add_recent(path)
+        if pr.folder is None:
+            pr.notes.append("예전 형식 프로젝트입니다 (데이터가 .dmap 안에 있음). 분석은 그대로 할 수 있고, "
+                            "'파일 › 배치 파일로 꺼내기'로 배치 파일 폴더를 만들면 배치 노트에서 고칠 수 있습니다.")
         if pr.notes:
             self._mark_dirty()
             self._show_notes(pr.notes)
+
+    def _open_recent(self, path):
+        if Path(path).is_dir():
+            self.open_folder(path)
+        elif Path(path).exists():
+            self.open_project(path)
+        else:
+            warn(self, f"찾을 수 없습니다:\n{path}")
 
     def _fill_recent(self):
         self.recent_menu.clear()
@@ -635,8 +738,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if isinstance(recent, str):
             recent = [recent]
         for p in recent:
-            a = self.recent_menu.addAction(p)
-            a.triggered.connect(lambda _c=False, path=p: self.open_project(path))
+            a = self.recent_menu.addAction(("📁 " if not p.endswith(".dmap") else "") + p)
+            a.triggered.connect(lambda _c=False, path=p: self._open_recent(path))
         self.recent_menu.setEnabled(bool(recent))
 
     def _add_recent(self, path):
@@ -650,6 +753,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def save(self) -> bool:
         if self.project is None:
+            return False
+        if self.project.folder is None and not self.export_batch_files():
             return False
         if self.project.path is None:
             return self.save_as()
@@ -675,7 +780,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def save_as(self) -> bool:
         if self.project is None:
             return False
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "프로젝트 저장", str(Path.home() / "Documents" / "droplet_project.dmap"),
+        start = (self.project.folder.parent / f"{self.project.folder.name}.dmap") if self.project.folder else (Path.home() / "Documents" / "droplet_project.dmap")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "프로젝트 저장 (분석 설정 · 화면 상태)", str(start),
                                                         "Droplet Map 프로젝트 (*.dmap)")
         if not path:
             return False
@@ -696,7 +802,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "visible_groups": sorted(self.groups_panel.visible_groups()),
                 "known_groups": sorted(self.project.groups) if self.project else [],
                 "map": self.map_page.ui_state(), "compare": self.compare_page.ui_state(), "score": self.score_page.ui_state(),
-                "batch": self.batch_page.ui_state(), "delivery": self.delivery_page.ui_state(),
+                "batch": self.batch_page.ui_state(), "measure": self.measure_page.ui_state(),
                 "batch_map": self.batch_map_page.ui_state(), "batch_table": self.batch_table_page.ui_state()}
 
     def _restore_ui(self, st):
@@ -722,7 +828,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.compare_page.restore_ui(st.get("compare"))
         self.score_page.restore_ui(st.get("score"))
         self.batch_page.restore_ui(st.get("batch"))
-        self.delivery_page.restore_ui(st.get("delivery"))
+        self.measure_page.restore_ui(st.get("measure"))
         self.batch_map_page.restore_ui(st.get("batch_map"))
         self.batch_table_page.restore_ui(st.get("batch_table"))
 
@@ -793,7 +899,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _analysis_done(self, result, dt, used):
         self.result = result
         self._used = used
-        for p in (self.map_page, self.compare_page, self.score_page, self.batch_page, self.delivery_page):
+        for p in (self.map_page, self.compare_page, self.score_page, self.batch_page, self.measure_page):
             p.set_result(result)
         self.map_page.set_visible_groups(self.groups_panel.visible_groups())
         kept = result.prepared.data["group"].value_counts()
@@ -958,14 +1064,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if p:
             self.log(f"기준 배치 score 표 저장: {p}")
 
-    def _save_delivery(self):
+    def _save_measure(self):
         if not self._need_project():
             return
-        if self.project.delivery.empty():
-            warn(self, "세포 전달 데이터가 없습니다."); return
-        p = save_frame_dialog(self, self.project.delivery.measures(), "cell_delivery_summary.csv")
+        f = self.measure_page.summary_frame()
+        if f is None:
+            warn(self, "조건별 측정 시트에 값이 없습니다."); return
+        p = save_frame_dialog(self, f, f"{self.measure_page.sheet.currentText()}_summary.csv")
         if p:
-            self.log(f"세포 전달 요약 표 저장: {p}")
+            self.log(f"측정 시트 요약 표 저장: {p}")
 
     def figures(self) -> dict:
         out = {}
@@ -977,7 +1084,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                     ("compare", self.compare_page, ("trend", "assoc", "sim")),
                                     ("score", self.score_page, ("rank", "dist")),
                                     ("batch", self.batch_page, ("dist", "delta", "score_canvas")),
-                                    ("delivery", self.delivery_page, ("plot",))):
+                                    ("measure", self.measure_page, ("plot",))):
             for n in names:
                 c = getattr(page, n, None)
                 if c is not None and c.fig.axes:
@@ -1008,7 +1115,8 @@ class MainWindow(QtWidgets.QMainWindow):
                               batch_score=self.batch_page.score_frame(), batch_map=self.batch_map_page)
         keep = self.project.path
         self.project.ui = self._ui_state()
-        self.project.save(out / f"{(keep.stem if keep else 'droplet_project')}.dmap")
+        if self.project.folder is not None:
+            self.project.save(out / f"{(keep.stem if keep else 'droplet_project')}.dmap")
         self.project.path = keep
         self.log(f"통합 저장: {out} ({len(files) + 1}개 파일)")
         return files
